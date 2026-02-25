@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -31,6 +32,7 @@ app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
 
 OCR_CONFIDENCE_THRESHOLD = 0.6
 OCR_MIN_VALID_WORDS_PER_PAGE = 5
+OCR_LANG = (os.getenv("OCR_LANG") or "por+eng").strip() or "por+eng"
 
 
 @dataclass
@@ -82,6 +84,14 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
     {"key": "ncm", "label": "NCMs"},
 ]
 
+DOC_TYPES = ["invoice", "packing_list", "bl"]
+MIN_COMPLETENESS_RATIO = 0.4
+REQUIRED_FIELDS_BY_DOC: Dict[str, List[str]] = {
+    "invoice": ["document_number", "issue_or_shipment_date", "consignee", "shipper", "total_value"],
+    "packing_list": ["document_number", "issue_or_shipment_date", "consignee", "gross_weight", "package_count"],
+    "bl": ["document_number", "issue_or_shipment_date", "consignee", "shipper", "pod"],
+}
+
 
 def _extract_text_pdfplumber(content: bytes) -> str:
     if not pdfplumber:
@@ -94,39 +104,72 @@ def _extract_text_pdfplumber(content: bytes) -> str:
     return "\n".join(text_parts)
 
 
-def _extract_text_ocr(content: bytes) -> str:
+def _get_ocr_lang_fallbacks() -> List[str]:
+    fallbacks = [OCR_LANG]
+    if OCR_LANG != "eng":
+        fallbacks.append("eng")
+    return fallbacks
+
+
+def _extract_text_ocr(content: bytes) -> tuple[str, int, int, List[str]]:
     if not pdfium or not pytesseract:
-        return ""
+        return "", 0, 0, [
+            "OCR indisponível: dependências ausentes (pytesseract e/ou pypdfium2)."
+        ]
 
     text_parts: List[str] = []
+    page_errors: List[str] = []
+    pages_with_text = 0
+    lang_candidates = _get_ocr_lang_fallbacks()
+
     pdf = pdfium.PdfDocument(io.BytesIO(content))
     for page_index in range(len(pdf)):
         page = pdf[page_index]
         image = page.render(scale=2.2).to_pil()
-        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        page_text = ""
+        last_error = ""
+        for lang in lang_candidates:
+            try:
+                page_text = pytesseract.image_to_string(image, lang=lang)
+                break
+            except pytesseract.TesseractError as exc:
+                last_error = str(exc)
+
+        if normalize_spaces(page_text):
+            pages_with_text += 1
+        elif last_error:
+            page_errors.append(
+                f"Página {page_index + 1}: falha no OCR para idiomas {', '.join(lang_candidates)} ({last_error})"
+            )
+
         text_parts.append(page_text or "")
-    return "\n".join(text_parts)
+    return "\n".join(text_parts), pages_with_text, len(pdf), page_errors
 
-        if valid_word_pattern.match(token):
-            valid_words += 1
-            confidences.append(conf_value / 100.0)
 
-def extract_text_from_pdf(content: bytes) -> str:
+def extract_text_from_pdf(content: bytes) -> tuple[str, List[OCRPageMetric], bool, str]:
     text = _extract_text_pdfplumber(content)
 
     # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
     if len(normalize_spaces(text)) < 30:
-        ocr_text = _extract_text_ocr(content)
+        ocr_text, pages_with_text, total_pages, page_errors = _extract_text_ocr(content)
         if normalize_spaces(ocr_text):
-            return ocr_text
+            return ocr_text, [], False, "ocr"
 
     if not normalize_spaces(text):
+        diagnostic = (
+            "Não foi possível extrair texto do PDF: nenhuma página retornou texto via extração direta ou OCR. "
+            f"OCR_LANG={OCR_LANG!r}, fallback={_get_ocr_lang_fallbacks()}"
+        )
+        if total_pages:
+            diagnostic += f", páginas com texto via OCR={pages_with_text}/{total_pages}"
+        if page_errors:
+            diagnostic += f". Último erro: {page_errors[-1]}"
         raise RuntimeError(
-            "Não foi possível extrair texto do PDF. "
-            "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+            f"{diagnostic}. "
+            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract) e ajuste OCR_LANG se necessário."
         )
 
-    return text
+    return text, [], False, "pdf_text"
 
 
 def normalize_spaces(value: str) -> str:
@@ -179,24 +222,70 @@ def _get_value_for_comparative_field(doc: DocumentData, doc_type: str, field_key
 def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     matrix: List[Dict[str, str]] = []
     divergences: List[str] = []
+    doc_completeness: Dict[str, Dict[str, Any]] = {
+        doc_type: {
+            "total_comparative_fields": len(COMPARATIVE_FIELDS),
+            "filled_comparative_fields": 0,
+            "completeness_ratio": 0.0,
+            "minimum_ratio": MIN_COMPLETENESS_RATIO,
+            "below_minimum": False,
+            "required_fields": REQUIRED_FIELDS_BY_DOC.get(doc_type, []),
+            "missing_required_fields": [],
+            "document_present": doc_type in session_docs,
+        }
+        for doc_type in DOC_TYPES
+    }
 
     for field_meta in COMPARATIVE_FIELDS:
         field_key = field_meta["key"]
         row = {"field": field_meta["label"]}
         values = []
-        for doc_type in ["invoice", "packing_list", "bl"]:
+        for doc_type in DOC_TYPES:
             doc = session_docs.get(doc_type)
             val = _get_value_for_comparative_field(doc, doc_type, field_key) if doc else ""
             row[doc_type] = val
+            if val:
+                doc_completeness[doc_type]["filled_comparative_fields"] += 1
             if val:
                 values.append(val.lower())
         matrix.append(row)
         if len(set(values)) > 1:
             divergences.append(f"Divergência no campo '{field_meta['label']}': valores diferentes entre documentos.")
 
-    missing_docs = [doc for doc in ["invoice", "packing_list", "bl"] if doc not in session_docs]
+    missing_docs = [doc for doc in DOC_TYPES if doc not in session_docs]
     if missing_docs:
         divergences.append(f"Pendência: documentos ausentes para análise cruzada: {', '.join(missing_docs)}")
+
+    for doc_type in DOC_TYPES:
+        metrics = doc_completeness[doc_type]
+        if not metrics["document_present"]:
+            continue
+
+        total_fields = metrics["total_comparative_fields"]
+        filled_fields = metrics["filled_comparative_fields"]
+        metrics["completeness_ratio"] = (filled_fields / total_fields) if total_fields else 0.0
+        metrics["below_minimum"] = metrics["completeness_ratio"] < MIN_COMPLETENESS_RATIO
+
+        missing_required_fields = []
+        for required_field in metrics["required_fields"]:
+            doc = session_docs.get(doc_type)
+            value = _get_value_for_comparative_field(doc, doc_type, required_field) if doc else ""
+            if not value:
+                missing_required_fields.append(required_field)
+        metrics["missing_required_fields"] = missing_required_fields
+
+        if metrics["below_minimum"]:
+            divergences.append(
+                "Pendência de completude: "
+                f"{doc_type} com {filled_fields}/{total_fields} campos comparativos preenchidos "
+                f"({metrics['completeness_ratio']:.0%}), abaixo do mínimo de {MIN_COMPLETENESS_RATIO:.0%}."
+            )
+
+        if missing_required_fields:
+            divergences.append(
+                "Pendência de campos obrigatórios: "
+                f"{doc_type} sem preenchimento de {', '.join(missing_required_fields)}."
+            )
 
     low_quality_docs = [doc.doc_type for doc in session_docs.values() if doc.low_ocr_confidence]
     if low_quality_docs:
@@ -205,7 +294,12 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
         )
 
     status = "Aprovado" if not divergences else "Com divergências"
-    return {"status": status, "matrix": matrix, "divergences": divergences}
+    return {
+        "status": status,
+        "matrix": matrix,
+        "divergences": divergences,
+        "completeness": doc_completeness,
+    }
 
 
 @app.route("/")
