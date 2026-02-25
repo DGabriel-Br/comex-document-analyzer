@@ -92,6 +92,30 @@ def _extract_text_ocr(content: bytes) -> str:
         text_parts.append(page_text or "")
     return "\n".join(text_parts)
 
+    text_parts: List[str] = []
+    pdf = pdfium.PdfDocument(io.BytesIO(content))
+    for page_index in range(len(pdf)):
+        page = pdf[page_index]
+        image = page.render(scale=2.2).to_pil()
+        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        text_parts.append(page_text or "")
+    return "\n".join(text_parts)
+
+
+def extract_text_from_pdf(content: bytes) -> str:
+    text = _extract_text_pdfplumber(content)
+
+    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
+    if len(normalize_spaces(text)) < 30:
+        ocr_text = _extract_text_ocr(content)
+        if normalize_spaces(ocr_text):
+            return ocr_text
+
+    if not normalize_spaces(text):
+        raise RuntimeError(
+            "Não foi possível extrair texto do PDF. "
+            "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+        )
 
 def extract_text_from_pdf(content: bytes) -> str:
     text = _extract_text_pdfplumber(content)
