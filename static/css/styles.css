@@ -1,0 +1,100 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1118;
+  --panel: #1c1f2b;
+  --border: #313548;
+  --text: #f4f6ff;
+  --muted: #adb3c8;
+  --primary: #565a6b;
+  --primary-hover: #666b80;
+  --ok: #31d0aa;
+  --warn: #ff9f43;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, Segoe UI, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+.container {
+  width: min(1200px, 95vw);
+  margin: 18px auto 24px;
+}
+h1 { margin-bottom: 6px; }
+.subtitle { color: var(--muted); margin-bottom: 20px; }
+.upload-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 12px;
+  border-radius: 8px;
+}
+.card h2 { font-size: 1rem; margin-top: 0; }
+input[type="file"] {
+  width: 100%;
+  border: 1px dashed var(--border);
+  background: #151825;
+  color: var(--muted);
+  padding: 10px;
+  border-radius: 6px;
+}
+button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  border: none;
+  border-radius: 6px;
+  background: var(--primary);
+  color: white;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { background: var(--primary-hover); }
+.primary { margin-top: 16px; }
+.secondary { margin-top: 14px; }
+.json-output {
+  margin-top: 10px;
+  min-height: 170px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #151825;
+  color: #c8ceeb;
+  font-size: 0.75rem;
+}
+.results {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 18px;
+  padding: 14px;
+}
+#status { margin-bottom: 10px; font-weight: 700; }
+#status.ok { color: var(--ok); }
+#status.warn { color: var(--warn); }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 10px;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 7px;
+  font-size: 0.88rem;
+}
+th { background: #171a25; }
+#divergences { margin-top: 4px; }
+#divergences li { margin-bottom: 4px; }
+
+@media (max-width: 980px) {
+  .upload-grid { grid-template-columns: 1fr; }
+}
