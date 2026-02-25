@@ -4,12 +4,13 @@ import io
 import json
 import re
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from flask import Flask, jsonify, render_template, request, send_file
+
+from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
 
 try:
     import pdfplumber
@@ -26,30 +27,11 @@ class DocumentData:
     filename: str
     extracted_at: str
     raw_text_preview: str
-    fields: Dict[str, str]
+    fields: Dict[str, Dict[str, Any]]
     line_items: List[Dict[str, str]]
 
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
-
-FIELD_PATTERNS = {
-    "invoice_number": [r"invoice\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "packing_list_number": [r"packing\s*list\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "bl_number": [r"(?:bill\s*of\s*lading|b/?l)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "po_number": [r"(?:po|purchase\s*order)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "shipper": [r"shipper\s*[:\-]?\s*([^\n]+)"],
-    "consignee": [r"consignee\s*[:\-]?\s*([^\n]+)"],
-    "origin_country": [r"country\s*of\s*origin\s*[:\-]?\s*([^\n]+)"],
-    "destination_country": [r"destination\s*[:\-]?\s*([^\n]+)"],
-    "incoterm": [r"incoterm\s*[:\-]?\s*([A-Z]{3})"],
-    "currency": [r"currency\s*[:\-]?\s*([A-Z]{3})"],
-    "net_weight": [r"net\s*weight\s*[:\-]?\s*([0-9.,]+\s*[A-Z]*)"],
-    "gross_weight": [r"gross\s*weight\s*[:\-]?\s*([0-9.,]+\s*[A-Z]*)"],
-    "package_count": [r"(?:total\s*)?(?:packages?|cartons?)\s*[:\-]?\s*([0-9.,]+)"],
-    "total_value": [r"(?:invoice\s*)?(?:total\s*amount|total\s*value|amount\s*due)\s*[:\-]?\s*([0-9.,]+)"],
-    "etd": [r"etd\s*[:\-]?\s*([0-9/\-.]+)"],
-    "eta": [r"eta\s*[:\-]?\s*([0-9/\-.]+)"],
-}
 
 
 def extract_text_from_pdf(content: bytes) -> str:
@@ -65,18 +47,6 @@ def extract_text_from_pdf(content: bytes) -> str:
 
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-
-
-def parse_fields(raw_text: str) -> Dict[str, str]:
-    text = raw_text.lower()
-    fields: Dict[str, str] = {}
-    for key, patterns in FIELD_PATTERNS.items():
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                fields[key] = normalize_spaces(match.group(1))
-                break
-    return fields
 
 
 def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
@@ -101,33 +71,15 @@ def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
 
 
 def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
-    track_fields = [
-        "invoice_number",
-        "packing_list_number",
-        "bl_number",
-        "po_number",
-        "shipper",
-        "consignee",
-        "origin_country",
-        "destination_country",
-        "incoterm",
-        "currency",
-        "package_count",
-        "net_weight",
-        "gross_weight",
-        "total_value",
-        "etd",
-        "eta",
-    ]
-
     matrix: List[Dict[str, str]] = []
     divergences: List[str] = []
 
-    for field in track_fields:
+    for field in CANONICAL_FIELDS:
         row = {"field": field}
         values = []
         for doc_type in ["invoice", "packing_list", "bl"]:
-            val = session_docs.get(doc_type).fields.get(field, "") if session_docs.get(doc_type) else ""
+            field_data = session_docs.get(doc_type).fields.get(field, {}) if session_docs.get(doc_type) else {}
+            val = field_data.get("value", "")
             row[doc_type] = val
             if val:
                 values.append(val.lower())
