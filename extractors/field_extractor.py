@@ -82,6 +82,97 @@ ALIASES: Dict[str, List[str]] = {
     "eta": ["eta", "estimated time of arrival", "arrival date"],
 }
 
+DOC_TYPE_PROFILES: Dict[str, Dict[str, object]] = {
+    "invoice": {
+        "field_priority": [
+            "invoice_number",
+            "document_number",
+            "issue_date",
+            "po_number",
+            "shipper",
+            "consignee",
+            "consignee_cnpj",
+            "goods_description",
+            "total_value",
+            "currency",
+            "freight_value",
+            "freight_term",
+            "incoterm",
+            "origin_country",
+            "provenance_country",
+            "acquisition_country",
+            "destination_country",
+            "net_weight",
+            "gross_weight",
+            "volume_cbm",
+            "package_count",
+            "ncm",
+        ],
+        "aliases": {
+            "invoice_number": ["invoice n°", "invoice nr", "invoice num"],
+            "issue_date": ["date of issue", "invoice issued on"],
+        },
+    },
+    "packing_list": {
+        "field_priority": [
+            "packing_list_number",
+            "document_number",
+            "shipment_date",
+            "issue_or_shipment_date",
+            "po_number",
+            "shipper",
+            "consignee",
+            "consignee_cnpj",
+            "goods_description",
+            "origin_country",
+            "destination_country",
+            "net_weight",
+            "gross_weight",
+            "volume_cbm",
+            "package_count",
+            "ncm",
+        ],
+        "aliases": {
+            "packing_list_number": ["p/l no", "packing list n°", "packing no"],
+            "package_count": ["qty packages", "number of packages"],
+        },
+    },
+    "bl": {
+        "field_priority": [
+            "bl_number",
+            "document_number",
+            "shipment_date",
+            "issue_or_shipment_date",
+            "shipper",
+            "consignee",
+            "consignee_cnpj",
+            "goods_description",
+            "freight_term",
+            "origin_country",
+            "destination_country",
+            "pol",
+            "pod",
+            "etd",
+            "eta",
+            "net_weight",
+            "gross_weight",
+            "volume_cbm",
+            "package_count",
+        ],
+        "aliases": {
+            "bl_number": ["b/l no", "bol no", "bill of lading number"],
+            "pol": ["load port", "port load"],
+            "pod": ["discharge port", "port discharge"],
+        },
+    },
+}
+
+DOC_NUMBER_FALLBACK_BY_TYPE: Dict[str, str] = {
+    "invoice": "invoice_number",
+    "packing_list": "packing_list_number",
+    "bl": "bl_number",
+}
+
 FIELD_VALUE_PATTERNS: Dict[str, str] = {
     "document_number": r"([A-Z0-9\-/]{3,})",
     "invoice_number": r"([A-Z0-9\-/]{4,})",
@@ -132,10 +223,24 @@ def _match_after_alias(line: str, alias: str, field: str) -> Optional[Candidate]
     return Candidate(value=normalize_spaces(match.group(1)), confidence=0.92)
 
 
-def layer_a_alias_regex(lines: List[str]) -> Dict[str, Candidate]:
+def _resolve_profile(doc_type: str) -> Tuple[List[str], Dict[str, List[str]]]:
+    profile = DOC_TYPE_PROFILES.get(doc_type.lower(), {})
+    field_priority = profile.get("field_priority", CANONICAL_FIELDS)
+    fields = [field for field in field_priority if field in CANONICAL_FIELDS]
+    if "document_number" not in fields:
+        fields.insert(1 if len(fields) > 1 else 0, "document_number")
+
+    aliases = {field: list(ALIASES.get(field, [])) for field in CANONICAL_FIELDS}
+    for field, extra_aliases in profile.get("aliases", {}).items():
+        aliases.setdefault(field, [])
+        aliases[field].extend(extra_aliases)
+    return fields, aliases
+
+
+def layer_a_alias_regex(lines: List[str], fields_priority: List[str], aliases_map: Dict[str, List[str]]) -> Dict[str, Candidate]:
     resolved: Dict[str, Candidate] = {}
-    for field in CANONICAL_FIELDS:
-        aliases = ALIASES.get(field, [])
+    for field in fields_priority:
+        aliases = aliases_map.get(field, [])
         for line in lines:
             for alias in aliases:
                 candidate = _match_after_alias(line, alias, field)
@@ -158,14 +263,19 @@ def _extract_from_window(window: Iterable[str], field: str) -> Optional[Candidat
     return None
 
 
-def layer_b_context(raw_text: str, already_resolved: Dict[str, Candidate]) -> Dict[str, Candidate]:
+def layer_b_context(
+    raw_text: str,
+    already_resolved: Dict[str, Candidate],
+    fields_priority: List[str],
+    aliases_map: Dict[str, List[str]],
+) -> Dict[str, Candidate]:
     lines = [normalize_spaces(line) for line in raw_text.splitlines() if normalize_spaces(line)]
     resolved: Dict[str, Candidate] = dict(already_resolved)
 
-    for field in CANONICAL_FIELDS:
+    for field in fields_priority:
         if field in resolved:
             continue
-        aliases = ALIASES.get(field, [])
+        aliases = aliases_map.get(field, [])
         for idx, line in enumerate(lines):
             if any(alias.lower() in line.lower() for alias in aliases):
                 start = max(0, idx - 2)
@@ -177,9 +287,9 @@ def layer_b_context(raw_text: str, already_resolved: Dict[str, Candidate]) -> Di
     return resolved
 
 
-def _build_llm_prompt(raw_text: str) -> str:
+def _build_llm_prompt(raw_text: str, fields_priority: List[str]) -> str:
     sample = raw_text[:12000]
-    schema = {key: "" for key in CANONICAL_FIELDS}
+    schema = {key: "" for key in fields_priority}
     return (
         "Extract shipping/commercial document fields and answer ONLY JSON. "
         f"Use this schema keys exactly: {json.dumps(schema, ensure_ascii=False)}. "
@@ -188,7 +298,7 @@ def _build_llm_prompt(raw_text: str) -> str:
     )
 
 
-def _call_openai_json(prompt: str) -> Optional[Dict[str, str]]:
+def _call_openai_json(prompt: str, fields_priority: List[str]) -> Optional[Dict[str, str]]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -228,11 +338,11 @@ def _call_openai_json(prompt: str) -> Optional[Dict[str, str]]:
     except json.JSONDecodeError:
         return None
 
-    return {k: normalize_spaces(str(parsed.get(k, ""))) for k in CANONICAL_FIELDS}
+    return {k: normalize_spaces(str(parsed.get(k, ""))) for k in fields_priority}
 
 
-def _ner_style_fallback(raw_text: str) -> Dict[str, str]:
-    resolved: Dict[str, str] = {k: "" for k in CANONICAL_FIELDS}
+def _ner_style_fallback(raw_text: str, fields_priority: List[str], doc_type: str) -> Dict[str, str]:
+    resolved: Dict[str, str] = {k: "" for k in fields_priority}
 
     patterns: List[Tuple[str, str]] = [
         ("invoice_number", r"invoice\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{4,})"),
@@ -250,12 +360,15 @@ def _ner_style_fallback(raw_text: str) -> Dict[str, str]:
     ]
 
     for field, pattern in patterns:
+        if field not in resolved:
+            continue
         match = re.search(pattern, raw_text, flags=re.IGNORECASE)
         if match:
             resolved[field] = normalize_spaces(match.group(1))
 
-    if resolved.get("invoice_number"):
-        resolved["document_number"] = resolved["invoice_number"]
+    fallback_field = DOC_NUMBER_FALLBACK_BY_TYPE.get(doc_type.lower())
+    if "document_number" in resolved and fallback_field in resolved and resolved.get(fallback_field):
+        resolved["document_number"] = resolved[fallback_field]
 
     for mirror_a, mirror_b in [("issue_or_shipment_date", "etd"), ("shipment_date", "etd")]:
         if not resolved.get(mirror_a) and resolved.get(mirror_b):
@@ -264,13 +377,18 @@ def _ner_style_fallback(raw_text: str) -> Dict[str, str]:
     return resolved
 
 
-def layer_c_llm_ner(raw_text: str, already_resolved: Dict[str, Candidate]) -> Dict[str, Candidate]:
+def layer_c_llm_ner(
+    raw_text: str,
+    already_resolved: Dict[str, Candidate],
+    fields_priority: List[str],
+    doc_type: str,
+) -> Dict[str, Candidate]:
     resolved = dict(already_resolved)
-    llm_result = _call_openai_json(_build_llm_prompt(raw_text))
+    llm_result = _call_openai_json(_build_llm_prompt(raw_text, fields_priority), fields_priority)
     if not llm_result:
-        llm_result = _ner_style_fallback(raw_text)
+        llm_result = _ner_style_fallback(raw_text, fields_priority, doc_type)
 
-    for field in CANONICAL_FIELDS:
+    for field in fields_priority:
         if field in resolved:
             continue
         value = normalize_spaces(str(llm_result.get(field, "")))
@@ -280,14 +398,40 @@ def layer_c_llm_ner(raw_text: str, already_resolved: Dict[str, Candidate]) -> Di
     return resolved
 
 
-def parse_fields(raw_text: str, confidence_threshold: float = CONFIDENCE_THRESHOLD) -> Dict[str, Dict[str, object]]:
+def _apply_document_number_fallback(resolved: Dict[str, Candidate], doc_type: str) -> None:
+    fallback_field = DOC_NUMBER_FALLBACK_BY_TYPE.get(doc_type.lower())
+    if not fallback_field or "document_number" in resolved:
+        return
+    candidate = resolved.get(fallback_field)
+    if not candidate:
+        return
+    resolved["document_number"] = Candidate(value=candidate.value, confidence=candidate.confidence)
+
+
+def parse_fields(
+    raw_text: str,
+    doc_type: str,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+) -> Dict[str, Dict[str, object]]:
+    fields_priority, aliases_map = _resolve_profile(doc_type)
+    relevant_fields = set(fields_priority)
     lines = [normalize_spaces(line) for line in raw_text.splitlines() if normalize_spaces(line)]
-    layer_a = layer_a_alias_regex(lines)
-    layer_b = layer_b_context(raw_text, layer_a)
-    layer_c = layer_c_llm_ner(raw_text, layer_b)
+    layer_a = layer_a_alias_regex(lines, fields_priority, aliases_map)
+    layer_b = layer_b_context(raw_text, layer_a, fields_priority, aliases_map)
+    layer_c = layer_c_llm_ner(raw_text, layer_b, fields_priority, doc_type)
+    _apply_document_number_fallback(layer_c, doc_type)
 
     final: Dict[str, Dict[str, object]] = {}
     for field in CANONICAL_FIELDS:
+        if field not in relevant_fields:
+            final[field] = {
+                "value": "",
+                "source_layer": "ignored",
+                "confidence": 0.0,
+                "pending_review": False,
+            }
+            continue
+
         candidate = layer_c.get(field)
         if not candidate:
             final[field] = {
