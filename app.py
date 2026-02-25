@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import uuid
 from dataclasses import asdict, dataclass
@@ -10,16 +11,6 @@ from typing import Any, Dict, List
 from flask import Flask, jsonify, make_response, render_template, request
 
 from extractors.field_extractor import parse_fields
-
-try:
-    import pypdfium2 as pdfium
-except Exception:  # pragma: no cover
-    pdfium = None
-
-try:
-    import pytesseract
-except Exception:  # pragma: no cover
-    pytesseract = None
 
 try:
     import pypdfium2 as pdfium
@@ -63,6 +54,8 @@ class DocumentData:
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
 
+OCR_LANG = (os.getenv("OCR_LANG") or "por+eng").strip() or "por+eng"
+
 
 COMPARATIVE_FIELDS: List[Dict[str, str]] = [
     {"key": "document_number", "label": "Número do documento"},
@@ -99,7 +92,7 @@ def _extract_text_pdf_ocr(content: bytes) -> str:
         page = pdf[page_index]
         image = page.render(scale=2.2).to_pil()
         try:
-            page_text = pytesseract.image_to_string(image, lang="por+eng")
+            page_text = pytesseract.image_to_string(image, lang=OCR_LANG)
         except Exception:
             page_text = pytesseract.image_to_string(image, lang="eng")
         text_parts.append(page_text or "")
@@ -118,8 +111,16 @@ def extract_text_from_pdf(content: bytes) -> str:
     return text
 
 
-def normalize_spaces(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+def extract_text_from_pdf(content: bytes) -> str:
+    text = _extract_text_pdf_ocr(content)
+
+    if not normalize_spaces(text):
+        raise RuntimeError(
+            "Não foi possível extrair texto do PDF via OCR. "
+            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+        )
+
+    return text
 
 
 def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
