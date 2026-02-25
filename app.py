@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import io
-import json
+import os
 import re
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, make_response, render_template, request
+
+from extractors.field_extractor import parse_fields
 
 try:
-    import pdfplumber
+    import pypdfium2 as pdfium
 except Exception:  # pragma: no cover
-    pdfplumber = None
+    pdfium = None
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover
+    pytesseract = None
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
@@ -26,57 +32,71 @@ class DocumentData:
     filename: str
     extracted_at: str
     raw_text_preview: str
-    fields: Dict[str, str]
+    fields: Dict[str, Dict[str, Any]]
     line_items: List[Dict[str, str]]
 
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
 
-FIELD_PATTERNS = {
-    "invoice_number": [r"invoice\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "packing_list_number": [r"packing\s*list\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "bl_number": [r"(?:bill\s*of\s*lading|b/?l)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "po_number": [r"(?:po|purchase\s*order)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]+)"],
-    "shipper": [r"shipper\s*[:\-]?\s*([^\n]+)"],
-    "consignee": [r"consignee\s*[:\-]?\s*([^\n]+)"],
-    "origin_country": [r"country\s*of\s*origin\s*[:\-]?\s*([^\n]+)"],
-    "destination_country": [r"destination\s*[:\-]?\s*([^\n]+)"],
-    "incoterm": [r"incoterm\s*[:\-]?\s*([A-Z]{3})"],
-    "currency": [r"currency\s*[:\-]?\s*([A-Z]{3})"],
-    "net_weight": [r"net\s*weight\s*[:\-]?\s*([0-9.,]+\s*[A-Z]*)"],
-    "gross_weight": [r"gross\s*weight\s*[:\-]?\s*([0-9.,]+\s*[A-Z]*)"],
-    "package_count": [r"(?:total\s*)?(?:packages?|cartons?)\s*[:\-]?\s*([0-9.,]+)"],
-    "total_value": [r"(?:invoice\s*)?(?:total\s*amount|total\s*value|amount\s*due)\s*[:\-]?\s*([0-9.,]+)"],
-    "etd": [r"etd\s*[:\-]?\s*([0-9/\-.]+)"],
-    "eta": [r"eta\s*[:\-]?\s*([0-9/\-.]+)"],
-}
+OCR_LANG = (os.getenv("OCR_LANG") or "por+eng").strip() or "por+eng"
+
+
+COMPARATIVE_FIELDS: List[Dict[str, str]] = [
+    {"key": "document_number", "label": "Número do documento"},
+    {"key": "issue_or_shipment_date", "label": "Data de Emissão / Embarque"},
+    {"key": "consignee", "label": "Importador / Consignee"},
+    {"key": "consignee_cnpj", "label": "CNPJ do Importador / Consignee"},
+    {"key": "shipper", "label": "Exportador / Shipper"},
+    {"key": "total_value", "label": "Valor total das invoices"},
+    {"key": "po_number", "label": "Número da Ordem de Compra"},
+    {"key": "goods_description", "label": "Descrição da Mercadoria"},
+    {"key": "freight_value", "label": "Valor do frete"},
+    {"key": "freight_term", "label": "Condição do frete"},
+    {"key": "incoterm", "label": "INCOTERM"},
+    {"key": "origin_country", "label": "País de Origem"},
+    {"key": "provenance_country", "label": "País de Procedência"},
+    {"key": "acquisition_country", "label": "País de Aquisição"},
+    {"key": "pol", "label": "Porto de carregamento (POL)"},
+    {"key": "pod", "label": "Porto de descarga (POD)"},
+    {"key": "net_weight", "label": "Peso líquido total"},
+    {"key": "gross_weight", "label": "Peso bruto total"},
+    {"key": "volume_cbm", "label": "Cubagem"},
+    {"key": "package_count", "label": "Quantidade de Volumes"},
+    {"key": "ncm", "label": "NCMs"},
+]
+
+
+def _extract_text_pdf_ocr(content: bytes) -> str:
+    if not pdfium or not pytesseract:
+        return ""
+
+    text_parts: List[str] = []
+    pdf = pdfium.PdfDocument(io.BytesIO(content))
+    for page_index in range(len(pdf)):
+        page = pdf[page_index]
+        image = page.render(scale=2.2).to_pil()
+        try:
+            page_text = pytesseract.image_to_string(image, lang=OCR_LANG)
+        except Exception:
+            page_text = pytesseract.image_to_string(image, lang="eng")
+        text_parts.append(page_text or "")
+    return "\n".join(text_parts)
 
 
 def extract_text_from_pdf(content: bytes) -> str:
-    if not pdfplumber:
-        raise RuntimeError("Dependência 'pdfplumber' não disponível para leitura de PDF.")
+    text = _extract_text_pdf_ocr(content)
 
-    text_parts: List[str] = []
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            text_parts.append(page.extract_text() or "")
-    return "\n".join(text_parts)
+    if not normalize_spaces(text):
+        raise RuntimeError(
+            "Não foi possível extrair texto do PDF via OCR. "
+            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+        )
+
+    return text
 
 
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-
-
-def parse_fields(raw_text: str) -> Dict[str, str]:
-    text = raw_text.lower()
-    fields: Dict[str, str] = {}
-    for key, patterns in FIELD_PATTERNS.items():
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                fields[key] = normalize_spaces(match.group(1))
-                break
-    return fields
 
 
 def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
@@ -100,40 +120,46 @@ def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
     return items[:30]
 
 
-def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
-    track_fields = [
-        "invoice_number",
-        "packing_list_number",
-        "bl_number",
-        "po_number",
-        "shipper",
-        "consignee",
-        "origin_country",
-        "destination_country",
-        "incoterm",
-        "currency",
-        "package_count",
-        "net_weight",
-        "gross_weight",
-        "total_value",
-        "etd",
-        "eta",
-    ]
+def _get_value_for_comparative_field(doc: DocumentData, doc_type: str, field_key: str) -> str:
+    if field_key == "document_number":
+        fallback_order = {
+            "invoice": ["invoice_number", "document_number"],
+            "packing_list": ["packing_list_number", "document_number"],
+            "bl": ["bl_number", "document_number"],
+        }
+        for key in fallback_order.get(doc_type, ["document_number"]):
+            value = doc.fields.get(key, {}).get("value", "")
+            if value:
+                return value
+        return ""
 
+    if field_key == "issue_or_shipment_date":
+        for key in ["issue_date", "shipment_date", "issue_or_shipment_date", "etd", "eta"]:
+            value = doc.fields.get(key, {}).get("value", "")
+            if value:
+                return value
+        return ""
+
+    return doc.fields.get(field_key, {}).get("value", "")
+
+
+def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     matrix: List[Dict[str, str]] = []
     divergences: List[str] = []
 
-    for field in track_fields:
-        row = {"field": field}
+    for field_meta in COMPARATIVE_FIELDS:
+        field_key = field_meta["key"]
+        row = {"field": field_meta["label"]}
         values = []
         for doc_type in ["invoice", "packing_list", "bl"]:
-            val = session_docs.get(doc_type).fields.get(field, "") if session_docs.get(doc_type) else ""
+            doc = session_docs.get(doc_type)
+            val = _get_value_for_comparative_field(doc, doc_type, field_key) if doc else ""
             row[doc_type] = val
             if val:
                 values.append(val.lower())
         matrix.append(row)
         if len(set(values)) > 1:
-            divergences.append(f"Divergência no campo '{field}': valores diferentes entre documentos.")
+            divergences.append(f"Divergência no campo '{field_meta['label']}': valores diferentes entre documentos.")
 
     missing_docs = [doc for doc in ["invoice", "packing_list", "bl"] if doc not in session_docs]
     if missing_docs:
@@ -179,7 +205,7 @@ def process_doc(doc_type: str):
         filename=file.filename,
         extracted_at=datetime.utcnow().isoformat(),
         raw_text_preview=text[:1500],
-        fields=parse_fields(text),
+        fields=parse_fields(text, doc_type=doc_type),
         line_items=parse_line_items(text),
     )
     SESSIONS[sid][doc_type] = doc
@@ -209,11 +235,12 @@ def report(session_id: str):
         "documents": {k: asdict(v) for k, v in SESSIONS[session_id].items()},
         "analysis": result,
     }
-    content = json.dumps(report_data, ensure_ascii=False, indent=2)
-    mem = io.BytesIO(content.encode("utf-8"))
-    mem.seek(0)
-    filename = f"relatorio_analise_{session_id[:8]}.json"
-    return send_file(mem, as_attachment=True, download_name=filename, mimetype="application/json")
+
+    html = render_template("report.html", report=report_data)
+    response = make_response(html)
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    response.headers["Content-Disposition"] = f"attachment; filename=relatorio_analise_{session_id[:8]}.html"
+    return response
 
 
 if __name__ == "__main__":
