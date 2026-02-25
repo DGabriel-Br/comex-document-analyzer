@@ -82,6 +82,14 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
     {"key": "ncm", "label": "NCMs"},
 ]
 
+DOC_TYPES = ["invoice", "packing_list", "bl"]
+MIN_COMPLETENESS_RATIO = 0.4
+REQUIRED_FIELDS_BY_DOC: Dict[str, List[str]] = {
+    "invoice": ["document_number", "issue_or_shipment_date", "consignee", "shipper", "total_value"],
+    "packing_list": ["document_number", "issue_or_shipment_date", "consignee", "gross_weight", "package_count"],
+    "bl": ["document_number", "issue_or_shipment_date", "consignee", "shipper", "pod"],
+}
+
 
 def _extract_text_pdfplumber(content: bytes) -> str:
     if not pdfplumber:
@@ -179,24 +187,70 @@ def _get_value_for_comparative_field(doc: DocumentData, doc_type: str, field_key
 def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     matrix: List[Dict[str, str]] = []
     divergences: List[str] = []
+    doc_completeness: Dict[str, Dict[str, Any]] = {
+        doc_type: {
+            "total_comparative_fields": len(COMPARATIVE_FIELDS),
+            "filled_comparative_fields": 0,
+            "completeness_ratio": 0.0,
+            "minimum_ratio": MIN_COMPLETENESS_RATIO,
+            "below_minimum": False,
+            "required_fields": REQUIRED_FIELDS_BY_DOC.get(doc_type, []),
+            "missing_required_fields": [],
+            "document_present": doc_type in session_docs,
+        }
+        for doc_type in DOC_TYPES
+    }
 
     for field_meta in COMPARATIVE_FIELDS:
         field_key = field_meta["key"]
         row = {"field": field_meta["label"]}
         values = []
-        for doc_type in ["invoice", "packing_list", "bl"]:
+        for doc_type in DOC_TYPES:
             doc = session_docs.get(doc_type)
             val = _get_value_for_comparative_field(doc, doc_type, field_key) if doc else ""
             row[doc_type] = val
+            if val:
+                doc_completeness[doc_type]["filled_comparative_fields"] += 1
             if val:
                 values.append(val.lower())
         matrix.append(row)
         if len(set(values)) > 1:
             divergences.append(f"Divergência no campo '{field_meta['label']}': valores diferentes entre documentos.")
 
-    missing_docs = [doc for doc in ["invoice", "packing_list", "bl"] if doc not in session_docs]
+    missing_docs = [doc for doc in DOC_TYPES if doc not in session_docs]
     if missing_docs:
         divergences.append(f"Pendência: documentos ausentes para análise cruzada: {', '.join(missing_docs)}")
+
+    for doc_type in DOC_TYPES:
+        metrics = doc_completeness[doc_type]
+        if not metrics["document_present"]:
+            continue
+
+        total_fields = metrics["total_comparative_fields"]
+        filled_fields = metrics["filled_comparative_fields"]
+        metrics["completeness_ratio"] = (filled_fields / total_fields) if total_fields else 0.0
+        metrics["below_minimum"] = metrics["completeness_ratio"] < MIN_COMPLETENESS_RATIO
+
+        missing_required_fields = []
+        for required_field in metrics["required_fields"]:
+            doc = session_docs.get(doc_type)
+            value = _get_value_for_comparative_field(doc, doc_type, required_field) if doc else ""
+            if not value:
+                missing_required_fields.append(required_field)
+        metrics["missing_required_fields"] = missing_required_fields
+
+        if metrics["below_minimum"]:
+            divergences.append(
+                "Pendência de completude: "
+                f"{doc_type} com {filled_fields}/{total_fields} campos comparativos preenchidos "
+                f"({metrics['completeness_ratio']:.0%}), abaixo do mínimo de {MIN_COMPLETENESS_RATIO:.0%}."
+            )
+
+        if missing_required_fields:
+            divergences.append(
+                "Pendência de campos obrigatórios: "
+                f"{doc_type} sem preenchimento de {', '.join(missing_required_fields)}."
+            )
 
     low_quality_docs = [doc.doc_type for doc in session_docs.values() if doc.low_ocr_confidence]
     if low_quality_docs:
@@ -205,7 +259,12 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
         )
 
     status = "Aprovado" if not divergences else "Com divergências"
-    return {"status": status, "matrix": matrix, "divergences": divergences}
+    return {
+        "status": status,
+        "matrix": matrix,
+        "divergences": divergences,
+        "completeness": doc_completeness,
+    }
 
 
 @app.route("/")
