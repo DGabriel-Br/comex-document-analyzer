@@ -3,15 +3,13 @@ from __future__ import annotations
 import io
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from statistics import mean
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from flask import Flask, jsonify, make_response, render_template, request
 
 from extractors.field_extractor import parse_fields
-from extractors.ocr_pipeline import preprocess_for_ocr
 
 try:
     import pdfplumber
@@ -96,81 +94,31 @@ def _extract_text_pdfplumber(content: bytes) -> str:
     return "\n".join(text_parts)
 
 
-def _score_ocr_page(page_text: str, tsv_data: Dict[str, List[str]]) -> Tuple[int, int, float]:
-    valid_word_pattern = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ0-9][A-Za-zÀ-ÖØ-öø-ÿ0-9\-./]{1,}$")
+def _extract_text_ocr(content: bytes) -> str:
+    if not pdfium or not pytesseract:
+        return ""
 
-    confidences: List[float] = []
-    valid_words = 0
-    words = tsv_data.get("text", [])
-    confs = tsv_data.get("conf", [])
-
-    for word, conf in zip(words, confs):
-        token = normalize_spaces(word)
-        if not token:
-            continue
-        try:
-            conf_value = float(conf)
-        except (TypeError, ValueError):
-            continue
-        if conf_value < 0:
-            continue
+    text_parts: List[str] = []
+    pdf = pdfium.PdfDocument(io.BytesIO(content))
+    for page_index in range(len(pdf)):
+        page = pdf[page_index]
+        image = page.render(scale=2.2).to_pil()
+        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        text_parts.append(page_text or "")
+    return "\n".join(text_parts)
 
         if valid_word_pattern.match(token):
             valid_words += 1
             confidences.append(conf_value / 100.0)
 
-    estimated_confidence = mean(confidences) if confidences else 0.0
-    return len(page_text), valid_words, round(estimated_confidence, 4)
-
-
-def _extract_text_ocr(content: bytes) -> Tuple[str, List[OCRPageMetric], bool]:
-    if not pdfium or not pytesseract:
-        return "", [], False
-
-    text_parts: List[str] = []
-    page_metrics: List[OCRPageMetric] = []
-    pdf = pdfium.PdfDocument(io.BytesIO(content))
-
-    for page_index in range(len(pdf)):
-        page = pdf[page_index]
-        image = page.render(scale=2.2).to_pil()
-        processed_image, rotation = preprocess_for_ocr(image)
-
-        page_text = pytesseract.image_to_string(processed_image, lang="por+eng")
-        tsv_data = pytesseract.image_to_data(
-            processed_image,
-            lang="por+eng",
-            output_type=pytesseract.Output.DICT,
-        )
-        characters, valid_words, confidence = _score_ocr_page(page_text or "", tsv_data)
-
-        page_metrics.append(
-            OCRPageMetric(
-                page_number=page_index + 1,
-                characters=characters,
-                valid_words=valid_words,
-                estimated_confidence=confidence,
-                rotation_applied=rotation,
-            )
-        )
-        text_parts.append(page_text or "")
-
-    low_confidence = any(
-        metric.estimated_confidence < OCR_CONFIDENCE_THRESHOLD
-        or metric.valid_words < OCR_MIN_VALID_WORDS_PER_PAGE
-        for metric in page_metrics
-    )
-
-    return "\n".join(text_parts), page_metrics, low_confidence
-
-
-def extract_text_from_pdf(content: bytes) -> Tuple[str, List[OCRPageMetric], bool, str]:
+def extract_text_from_pdf(content: bytes) -> str:
     text = _extract_text_pdfplumber(content)
 
+    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
     if len(normalize_spaces(text)) < 30:
-        ocr_text, ocr_quality, low_ocr_confidence = _extract_text_ocr(content)
+        ocr_text = _extract_text_ocr(content)
         if normalize_spaces(ocr_text):
-            return ocr_text, ocr_quality, low_ocr_confidence, "ocr"
+            return ocr_text
 
     if not normalize_spaces(text):
         raise RuntimeError(
@@ -178,7 +126,7 @@ def extract_text_from_pdf(content: bytes) -> Tuple[str, List[OCRPageMetric], boo
             "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
         )
 
-    return text, [], False, "pdfplumber"
+    return text
 
 
 def normalize_spaces(value: str) -> str:
@@ -296,7 +244,7 @@ def process_doc(doc_type: str):
         filename=file.filename,
         extracted_at=datetime.utcnow().isoformat(),
         raw_text_preview=text[:1500],
-        fields=parse_fields(text, doc_type),
+        fields=parse_fields(text, doc_type=doc_type),
         line_items=parse_line_items(text),
         extraction_method=extraction_method,
         low_ocr_confidence=low_ocr_confidence,
