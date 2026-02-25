@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import io
-import json
 import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, make_response, render_template, request
+
+from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
 
 from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
 
@@ -16,6 +17,16 @@ try:
     import pdfplumber
 except Exception:  # pragma: no cover
     pdfplumber = None
+
+try:
+    import pypdfium2 as pdfium
+except Exception:  # pragma: no cover
+    pdfium = None
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover
+    pytesseract = None
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
@@ -34,15 +45,47 @@ class DocumentData:
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
 
 
-def extract_text_from_pdf(content: bytes) -> str:
+def _extract_text_pdfplumber(content: bytes) -> str:
     if not pdfplumber:
-        raise RuntimeError("Dependência 'pdfplumber' não disponível para leitura de PDF.")
+        return ""
 
     text_parts: List[str] = []
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         for page in pdf.pages:
             text_parts.append(page.extract_text() or "")
     return "\n".join(text_parts)
+
+
+def _extract_text_ocr(content: bytes) -> str:
+    if not pdfium or not pytesseract:
+        return ""
+
+    text_parts: List[str] = []
+    pdf = pdfium.PdfDocument(io.BytesIO(content))
+    for page_index in range(len(pdf)):
+        page = pdf[page_index]
+        image = page.render(scale=2.2).to_pil()
+        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        text_parts.append(page_text or "")
+    return "\n".join(text_parts)
+
+
+def extract_text_from_pdf(content: bytes) -> str:
+    text = _extract_text_pdfplumber(content)
+
+    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
+    if len(normalize_spaces(text)) < 30:
+        ocr_text = _extract_text_ocr(content)
+        if normalize_spaces(ocr_text):
+            return ocr_text
+
+    if not normalize_spaces(text):
+        raise RuntimeError(
+            "Não foi possível extrair texto do PDF. "
+            "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+        )
+
+    return text
 
 
 def normalize_spaces(value: str) -> str:
@@ -161,11 +204,12 @@ def report(session_id: str):
         "documents": {k: asdict(v) for k, v in SESSIONS[session_id].items()},
         "analysis": result,
     }
-    content = json.dumps(report_data, ensure_ascii=False, indent=2)
-    mem = io.BytesIO(content.encode("utf-8"))
-    mem.seek(0)
-    filename = f"relatorio_analise_{session_id[:8]}.json"
-    return send_file(mem, as_attachment=True, download_name=filename, mimetype="application/json")
+
+    html = render_template("report.html", report=report_data)
+    response = make_response(html)
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    response.headers["Content-Disposition"] = f"attachment; filename=relatorio_analise_{session_id[:8]}.html"
+    return response
 
 
 if __name__ == "__main__":
