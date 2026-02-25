@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Análise Crítica de Documentos de Importação</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Análise Crítica de Documentos de Importação</h1>
+      <p class="subtitle">Executa análise cruzada entre Fatura, Packing List e Conhecimento de Embarque.</p>
+
+      <section class="upload-grid">
+        <article class="card" data-doc="invoice">
+          <h2>Fatura (uma ou mais)</h2>
+          <input type="file" accept="application/pdf" />
+          <button class="process-btn">Processa Fatura(s)</button>
+          <pre class="json-output"></pre>
+        </article>
+
+        <article class="card" data-doc="packing_list">
+          <h2>Packing List (uma ou mais)</h2>
+          <input type="file" accept="application/pdf" />
+          <button class="process-btn">Processa Packing List(s)</button>
+          <pre class="json-output"></pre>
+        </article>
+
+        <article class="card" data-doc="bl">
+          <h2>Bill of Lading</h2>
+          <input type="file" accept="application/pdf" />
+          <button class="process-btn">Processa B/L</button>
+          <pre class="json-output"></pre>
+        </article>
+      </section>
+
+      <button id="analyze-btn" class="primary">Executa Análise Crítica</button>
+
+      <section class="results">
+        <h2>Quadro Comparativo</h2>
+        <div id="status"></div>
+        <table id="compare-table">
+          <thead>
+            <tr>
+              <th>Campo</th>
+              <th>Invoice</th>
+              <th>Packing List</th>
+              <th>B/L</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <h3>Divergências e Pendências</h3>
+        <ul id="divergences"></ul>
+      </section>
+
+      <button id="download-btn" class="primary secondary">Download do Relatório</button>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  </body>
+</html>
