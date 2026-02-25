@@ -296,7 +296,7 @@ def process_doc(doc_type: str):
         filename=file.filename,
         extracted_at=datetime.utcnow().isoformat(),
         raw_text_preview=text[:1500],
-        fields=parse_fields(text),
+        fields=parse_fields(text, doc_type),
         line_items=parse_line_items(text),
         extraction_method=extraction_method,
         low_ocr_confidence=low_ocr_confidence,
