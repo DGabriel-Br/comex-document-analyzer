@@ -60,48 +60,6 @@
     {% endif %}
   </ul>
 
-  <h2>Completude por Documento</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Documento</th>
-        <th>Campos comparativos preenchidos</th>
-        <th>Completude</th>
-        <th>Limiar mínimo</th>
-        <th>Campos obrigatórios faltantes</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for doc_type, metrics in report.analysis.completeness.items() %}
-      <tr>
-        <td>{{ doc_type }}</td>
-        <td>
-          {% if metrics.document_present %}
-            {{ metrics.filled_comparative_fields }}/{{ metrics.total_comparative_fields }}
-          {% else %}
-            Documento ausente
-          {% endif %}
-        </td>
-        <td>
-          {% if metrics.document_present %}
-            {{ (metrics.completeness_ratio * 100) | round(1) }}%
-          {% else %}
-            -
-          {% endif %}
-        </td>
-        <td>{{ (metrics.minimum_ratio * 100) | round(0) }}%</td>
-        <td>
-          {% if metrics.missing_required_fields %}
-            {{ metrics.missing_required_fields | join(', ') }}
-          {% else %}
-            -
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-
   <h2>Detalhe por Documento</h2>
   {% for doc_type, doc in report.documents.items() %}
   <div class="doc">

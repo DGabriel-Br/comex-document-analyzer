@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import io
-import os
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -13,9 +12,14 @@ from flask import Flask, jsonify, make_response, render_template, request
 from extractors.field_extractor import parse_fields
 
 try:
-    import pdfplumber
+    import pypdfium2 as pdfium
 except Exception:  # pragma: no cover
-    pdfplumber = None
+    pdfium = None
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover
+    pytesseract = None
 
 try:
     import pypdfium2 as pdfium
@@ -84,92 +88,34 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
     {"key": "ncm", "label": "NCMs"},
 ]
 
-DOC_TYPES = ["invoice", "packing_list", "bl"]
-MIN_COMPLETENESS_RATIO = 0.4
-REQUIRED_FIELDS_BY_DOC: Dict[str, List[str]] = {
-    "invoice": ["document_number", "issue_or_shipment_date", "consignee", "shipper", "total_value"],
-    "packing_list": ["document_number", "issue_or_shipment_date", "consignee", "gross_weight", "package_count"],
-    "bl": ["document_number", "issue_or_shipment_date", "consignee", "shipper", "pod"],
-}
 
-
-def _extract_text_pdfplumber(content: bytes) -> str:
-    if not pdfplumber:
+def _extract_text_pdf_ocr(content: bytes) -> str:
+    if not pdfium or not pytesseract:
         return ""
 
     text_parts: List[str] = []
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            text_parts.append(page.extract_text() or "")
-    return "\n".join(text_parts)
-
-
-def _get_ocr_lang_fallbacks() -> List[str]:
-    fallbacks = [OCR_LANG]
-    if OCR_LANG != "eng":
-        fallbacks.append("eng")
-    return fallbacks
-
-
-def _extract_text_ocr(content: bytes) -> tuple[str, int, int, List[str]]:
-    if not pdfium or not pytesseract:
-        return "", 0, 0, [
-            "OCR indisponível: dependências ausentes (pytesseract e/ou pypdfium2)."
-        ]
-
-    text_parts: List[str] = []
-    page_errors: List[str] = []
-    pages_with_text = 0
-    lang_candidates = _get_ocr_lang_fallbacks()
-
     pdf = pdfium.PdfDocument(io.BytesIO(content))
     for page_index in range(len(pdf)):
         page = pdf[page_index]
         image = page.render(scale=2.2).to_pil()
-        page_text = ""
-        last_error = ""
-        for lang in lang_candidates:
-            try:
-                page_text = pytesseract.image_to_string(image, lang=lang)
-                break
-            except pytesseract.TesseractError as exc:
-                last_error = str(exc)
-
-        if normalize_spaces(page_text):
-            pages_with_text += 1
-        elif last_error:
-            page_errors.append(
-                f"Página {page_index + 1}: falha no OCR para idiomas {', '.join(lang_candidates)} ({last_error})"
-            )
-
+        try:
+            page_text = pytesseract.image_to_string(image, lang="por+eng")
+        except Exception:
+            page_text = pytesseract.image_to_string(image, lang="eng")
         text_parts.append(page_text or "")
-    return "\n".join(text_parts), pages_with_text, len(pdf), page_errors
+    return "\n".join(text_parts)
 
 
-def extract_text_from_pdf(content: bytes) -> tuple[str, List[OCRPageMetric], bool, str]:
-    text = _extract_text_pdfplumber(content)
-
-    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
-    if len(normalize_spaces(text)) < 30:
-        ocr_text, pages_with_text, total_pages, page_errors = _extract_text_ocr(content)
-        if normalize_spaces(ocr_text):
-            return ocr_text, [], False, "ocr"
+def extract_text_from_pdf(content: bytes) -> str:
+    text = _extract_text_pdf_ocr(content)
 
     if not normalize_spaces(text):
-        diagnostic = (
-            "Não foi possível extrair texto do PDF: nenhuma página retornou texto via extração direta ou OCR. "
-            f"OCR_LANG={OCR_LANG!r}, fallback={_get_ocr_lang_fallbacks()}"
-        )
-        if total_pages:
-            diagnostic += f", páginas com texto via OCR={pages_with_text}/{total_pages}"
-        if page_errors:
-            diagnostic += f". Último erro: {page_errors[-1]}"
         raise RuntimeError(
-            f"{diagnostic}. "
-            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract) e ajuste OCR_LANG se necessário."
+            "Não foi possível extrair texto do PDF via OCR. "
+            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
         )
 
-    return text, [], False, "pdf_text"
+    return text
 
 
 def normalize_spaces(value: str) -> str:
@@ -240,7 +186,7 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
         field_key = field_meta["key"]
         row = {"field": field_meta["label"]}
         values = []
-        for doc_type in DOC_TYPES:
+        for doc_type in ["invoice", "packing_list", "bl"]:
             doc = session_docs.get(doc_type)
             val = _get_value_for_comparative_field(doc, doc_type, field_key) if doc else ""
             row[doc_type] = val

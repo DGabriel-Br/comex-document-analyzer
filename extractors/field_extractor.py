@@ -143,7 +143,6 @@ ALIASES: Dict[str, List[str]] = {
     "gross_weight": ["gross weight", "peso bruto", "g.w.", "gw"],
     "volume_cbm": ["cbm", "cubagem", "volume"],
     "package_count": ["total packages", "packages", "quantidade de volumes", "cartons", "no. of packages"],
-    "package_count": ["total packages", "packages", "quantidade de volumes", "cartons"],
     "ncm": ["ncm", "ncms", "hs code", "hscode"],
     "total_value": ["total amount", "total value", "amount due", "invoice total"],
     "etd": ["etd", "estimated time of departure", "departure date"],
@@ -250,15 +249,10 @@ def _is_valid_candidate(field: str, value: str) -> bool:
     return True
 
 
-
-
-def _alias_pattern(alias: str) -> str:
-    return rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])"
-
 def _match_after_alias(line: str, alias: str, field: str) -> Optional[Candidate]:
     pattern = FIELD_VALUE_PATTERNS[field]
     candidate_pattern = re.compile(
-        rf"{_alias_pattern(alias)}\s*(?:no|number|#)?\s*[:\-]?\s*{pattern}",
+        rf"\b{re.escape(alias)}\b\s*(?:no|number|#)?\s*[:\-]?\s*{pattern}",
         flags=re.IGNORECASE,
     )
     match = candidate_pattern.search(line)
@@ -268,71 +262,6 @@ def _match_after_alias(line: str, alias: str, field: str) -> Optional[Candidate]
     if not _is_valid_candidate(field, value):
         return None
     return Candidate(value=value, confidence=0.92)
-
-
-STRONG_TOKEN_FIELDS = {
-    "document_number",
-    "invoice_number",
-    "packing_list_number",
-    "bl_number",
-    "po_number",
-    "consignee_cnpj",
-    "issue_date",
-    "shipment_date",
-    "issue_or_shipment_date",
-    "etd",
-    "eta",
-    "ncm",
-    "freight_value",
-    "total_value",
-    "net_weight",
-    "gross_weight",
-    "volume_cbm",
-    "package_count",
-}
-
-
-def _line_has_alias(line: str, aliases: List[str]) -> bool:
-    return any(re.search(_alias_pattern(alias), line, flags=re.IGNORECASE) for alias in aliases)
-
-
-def _line_fragments(line: str, field: str, aliases: List[str]) -> List[str]:
-    fragments: List[str] = []
-
-    for alias in aliases:
-        match = re.search(_alias_pattern(alias), line, flags=re.IGNORECASE)
-        if not match:
-            continue
-        after_alias = normalize_spaces(line[match.end() :])
-        if after_alias:
-            fragments.append(after_alias)
-
-    for sep in (":", "|"):
-        if sep in line:
-            right = normalize_spaces(line.split(sep, 1)[1])
-            if right:
-                fragments.append(right)
-
-    if re.search(r"\s-\s", line):
-        right = normalize_spaces(re.split(r"\s-\s", line, maxsplit=1)[1])
-        if right:
-            fragments.append(right)
-
-    fragments.append(line)
-
-    if field in STRONG_TOKEN_FIELDS:
-        fragments.extend(re.findall(r"[A-Za-z0-9][A-Za-z0-9./\-]*", line))
-
-    # preserva ordem, removendo duplicatas
-    ordered_unique: List[str] = []
-    seen = set()
-    for fragment in fragments:
-        normalized = normalize_spaces(fragment)
-        key = normalized.lower()
-        if normalized and key not in seen:
-            seen.add(key)
-            ordered_unique.append(normalized)
-    return ordered_unique
 
 
 def layer_a_alias_regex(lines: List[str], active_fields: List[str]) -> Dict[str, Candidate]:
@@ -350,48 +279,16 @@ def layer_a_alias_regex(lines: List[str], active_fields: List[str]) -> Dict[str,
     return resolved
 
 
-def _extract_from_window(
-    window: Iterable[str],
-    field: str,
-    aliases: Optional[List[str]] = None,
-    anchor_index: Optional[int] = None,
-) -> Optional[Candidate]:
-    aliases = aliases or []
+def _extract_from_window(window: Iterable[str], field: str) -> Optional[Candidate]:
     pattern = re.compile(FIELD_VALUE_PATTERNS[field], flags=re.IGNORECASE)
-    lines = list(window)
-    if not lines:
-        return None
-
-    ordered_indexes: List[int] = []
-    if anchor_index is not None and 0 <= anchor_index < len(lines):
-        ordered_indexes.append(anchor_index)
-        if anchor_index + 1 < len(lines):
-            ordered_indexes.append(anchor_index + 1)
-        if anchor_index - 1 >= 0:
-            ordered_indexes.append(anchor_index - 1)
-
-    for idx in range(len(lines)):
-        if idx not in ordered_indexes:
-            ordered_indexes.append(idx)
-
-    for idx in ordered_indexes:
-        line = lines[idx]
-        has_alias = _line_has_alias(line, aliases)
-        fragments = _line_fragments(line, field, aliases)
-        if has_alias:
-            confidence = 0.82
-        elif anchor_index is not None and idx == anchor_index + 1:
-            confidence = 0.8
-        else:
-            confidence = 0.78
-
-        for fragment in fragments:
-            match = pattern.search(fragment)
-            if not match:
-                continue
+    for line in window:
+        if ":" not in line and "-" not in line:
+            continue
+        match = pattern.search(line)
+        if match:
             value = normalize_spaces(match.group(1))
             if _is_valid_candidate(field, value):
-                return Candidate(value=value, confidence=confidence)
+                return Candidate(value=value, confidence=0.8)
     return None
 
 
@@ -403,37 +300,14 @@ def layer_b_context(raw_text: str, already_resolved: Dict[str, Candidate], activ
         if field in resolved:
             continue
         aliases = ALIASES.get(field, [])
-        alias_indexes = [idx for idx, line in enumerate(lines) if _line_has_alias(line, aliases)]
-
-        # Prioriza linha com alias explícito + próxima linha (key-value vertical comum em OCR)
-        for idx in alias_indexes:
-            end = min(len(lines), idx + 2)
-            candidate = _extract_from_window(
-                lines[idx:end],
-                field,
-                aliases=aliases,
-                anchor_index=0,
-            )
-            if candidate:
-                resolved[field] = candidate
-                break
-
-        if field in resolved:
-            continue
-
-        # Fallback em vizinhança para quando alias e valor caem em linhas adjacentes
-        for idx in alias_indexes:
-            start = max(0, idx - 1)
-            end = min(len(lines), idx + 3)
-            candidate = _extract_from_window(
-                lines[start:end],
-                field,
-                aliases=aliases,
-                anchor_index=idx - start,
-            )
-            if candidate:
-                resolved[field] = candidate
-                break
+        for idx, line in enumerate(lines):
+            if any(re.search(rf"\b{re.escape(alias)}\b", line, flags=re.IGNORECASE) for alias in aliases):
+                start = max(0, idx - 1)
+                end = min(len(lines), idx + 2)
+                candidate = _extract_from_window(lines[start:end], field)
+                if candidate:
+                    resolved[field] = candidate
+                    break
     return resolved
 
 

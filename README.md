@@ -15,8 +15,7 @@ Sistema web para análise documental de importação (Invoice, Packing List e Bi
 
 ## Stack
 - Backend: Flask
-- Parsing de PDF: pdfplumber
-- OCR: pypdfium2 + pytesseract (com binário Tesseract no sistema)
+- Parsing de PDF: OCR com pypdfium2 + pytesseract
 - Frontend: HTML/CSS/JavaScript
 
 ## Como executar
@@ -85,6 +84,5 @@ Estrutura retornada por `parse_fields` (com metadados de camada e confiança):
 ```
 
 ## Observações
-- As regras de extração e os metadados de confiança/camada estão em `extractors/field_extractor.py` (função `parse_fields`).
-- O comparativo usa a constante `COMPARATIVE_FIELDS` em `app.py`.
-- O relatório é gerado em HTML pelo endpoint `GET /api/report/<session_id>`.
+- A extração de texto é feita via OCR (pypdfium2 + pytesseract) e o parser em camadas está em `extractors/field_extractor.py`.
+- É necessário ter o binário do Tesseract instalado no sistema para OCR funcionar.
