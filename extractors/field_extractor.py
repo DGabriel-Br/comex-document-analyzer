@@ -10,19 +10,33 @@ from urllib import error, request
 CONFIDENCE_THRESHOLD = 0.75
 
 CANONICAL_FIELDS = [
+    "document_number",
     "invoice_number",
     "packing_list_number",
     "bl_number",
+    "issue_date",
+    "shipment_date",
+    "issue_or_shipment_date",
     "po_number",
     "shipper",
     "consignee",
+    "consignee_cnpj",
+    "goods_description",
+    "freight_value",
+    "freight_term",
     "origin_country",
+    "provenance_country",
+    "acquisition_country",
     "destination_country",
+    "pol",
+    "pod",
     "incoterm",
     "currency",
     "net_weight",
     "gross_weight",
+    "volume_cbm",
     "package_count",
+    "ncm",
     "total_value",
     "etd",
     "eta",
@@ -36,38 +50,66 @@ class Candidate:
 
 
 ALIASES: Dict[str, List[str]] = {
+    "document_number": ["document number", "número do documento", "doc no"],
     "invoice_number": ["invoice no", "invoice number", "inv#", "commercial invoice number"],
     "packing_list_number": ["packing list no", "packing list number", "p/l number"],
     "bl_number": ["bill of lading no", "bl no", "b/l number"],
-    "po_number": ["po no", "purchase order", "order no"],
-    "shipper": ["shipper", "exporter", "seller"],
-    "consignee": ["consignee", "buyer", "importer"],
-    "origin_country": ["country of origin", "origin country", "made in"],
+    "issue_date": ["issue date", "data de emissão", "invoice date"],
+    "shipment_date": ["shipment date", "embarque", "shipping date"],
+    "issue_or_shipment_date": ["data de emissão / embarque", "issue/shipment date"],
+    "po_number": ["po no", "purchase order", "ordem de compra", "order no"],
+    "shipper": ["shipper", "exporter", "exportador", "seller"],
+    "consignee": ["consignee", "importador", "buyer", "importer"],
+    "consignee_cnpj": ["cnpj do importador", "cnpj consignee", "consignee tax id"],
+    "goods_description": ["description of goods", "descrição da mercadoria", "commodity"],
+    "freight_value": ["freight value", "valor do frete", "freight amount"],
+    "freight_term": ["freight term", "condição do frete", "freight condition"],
+    "origin_country": ["country of origin", "país de origem", "made in"],
+    "provenance_country": ["país de procedência", "country of provenance"],
+    "acquisition_country": ["país de aquisição", "country of acquisition"],
     "destination_country": ["destination", "destination country", "country of destination"],
+    "pol": ["port of loading", "pol", "porto de carregamento"],
+    "pod": ["port of discharge", "pod", "porto de descarga"],
     "incoterm": ["incoterm", "terms of delivery", "trade term"],
     "currency": ["currency", "curr", "invoice currency"],
-    "net_weight": ["net weight", "n.w.", "nw"],
-    "gross_weight": ["gross weight", "g.w.", "gw"],
-    "package_count": ["total packages", "packages", "cartons"],
+    "net_weight": ["net weight", "peso líquido", "n.w.", "nw"],
+    "gross_weight": ["gross weight", "peso bruto", "g.w.", "gw"],
+    "volume_cbm": ["cbm", "cubagem", "volume"],
+    "package_count": ["total packages", "packages", "quantidade de volumes", "cartons"],
+    "ncm": ["ncm", "ncms", "hs code", "hscode"],
     "total_value": ["total amount", "total value", "amount due", "invoice total"],
     "etd": ["etd", "estimated time of departure", "departure date"],
     "eta": ["eta", "estimated time of arrival", "arrival date"],
 }
 
 FIELD_VALUE_PATTERNS: Dict[str, str] = {
+    "document_number": r"([A-Z0-9\-/]{3,})",
     "invoice_number": r"([A-Z0-9\-/]{4,})",
     "packing_list_number": r"([A-Z0-9\-/]{4,})",
     "bl_number": r"([A-Z0-9\-/]{4,})",
+    "issue_date": r"([0-9]{1,4}[./\-][0-9]{1,2}[./\-][0-9]{1,4})",
+    "shipment_date": r"([0-9]{1,4}[./\-][0-9]{1,2}[./\-][0-9]{1,4})",
+    "issue_or_shipment_date": r"([0-9]{1,4}[./\-][0-9]{1,2}[./\-][0-9]{1,4})",
     "po_number": r"([A-Z0-9\-/]{3,})",
     "shipper": r"([A-Za-z0-9&.,\-\s]{3,})",
     "consignee": r"([A-Za-z0-9&.,\-\s]{3,})",
+    "consignee_cnpj": r"([0-9./\-]{14,20})",
+    "goods_description": r"([A-Za-z0-9,./\-\s]{5,})",
+    "freight_value": r"([0-9][0-9.,]*)",
+    "freight_term": r"([A-Za-z\s]{3,})",
     "origin_country": r"([A-Za-z\s]{3,})",
+    "provenance_country": r"([A-Za-z\s]{3,})",
+    "acquisition_country": r"([A-Za-z\s]{3,})",
     "destination_country": r"([A-Za-z\s]{3,})",
+    "pol": r"([A-Za-z\s]{3,})",
+    "pod": r"([A-Za-z\s]{3,})",
     "incoterm": r"\b([A-Z]{3})\b",
     "currency": r"\b([A-Z]{3})\b",
     "net_weight": r"([0-9][0-9.,]*\s*[A-Za-z]{0,3})",
     "gross_weight": r"([0-9][0-9.,]*\s*[A-Za-z]{0,3})",
+    "volume_cbm": r"([0-9][0-9.,]*\s*(?:CBM|M3)?)",
     "package_count": r"([0-9][0-9.,]*)",
+    "ncm": r"([0-9]{4,8}(?:\.[0-9]{2})?)",
     "total_value": r"([0-9][0-9.,]*)",
     "etd": r"([0-9]{1,4}[./\-][0-9]{1,2}[./\-][0-9]{1,4})",
     "eta": r"([0-9]{1,4}[./\-][0-9]{1,2}[./\-][0-9]{1,4})",
@@ -177,12 +219,7 @@ def _call_openai_json(prompt: str) -> Optional[Dict[str, str]]:
     except (error.URLError, TimeoutError, json.JSONDecodeError):
         return None
 
-    content = (
-        body.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
+    content = body.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
     if not content:
         return None
 
@@ -197,36 +234,32 @@ def _call_openai_json(prompt: str) -> Optional[Dict[str, str]]:
 def _ner_style_fallback(raw_text: str) -> Dict[str, str]:
     resolved: Dict[str, str] = {k: "" for k in CANONICAL_FIELDS}
 
-    document_patterns: List[Tuple[str, str]] = [
-        ("invoice_number", r"\binv(?:oice)?\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{4,})"),
+    patterns: List[Tuple[str, str]] = [
+        ("invoice_number", r"invoice\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{4,})"),
         ("packing_list_number", r"packing\s*list\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{4,})"),
         ("bl_number", r"(?:bill\s*of\s*lading|b/?l)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{4,})"),
-        ("po_number", r"(?:po|purchase\s*order)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{3,})"),
+        ("po_number", r"(?:po|purchase\s*order|ordem\s*de\s*compra)\s*(?:no|number|#)?\s*[:\-]?\s*([A-Z0-9\-/]{3,})"),
+        ("consignee_cnpj", r"cnpj\s*(?:do\s*importador|consignee)?\s*[:\-]?\s*([0-9./\-]{14,20})"),
+        ("goods_description", r"(?:description\s*of\s*goods|descrição\s*da\s*mercadoria)\s*[:\-]?\s*([^\n]{5,120})"),
+        ("freight_value", r"(?:freight\s*value|valor\s*do\s*frete)\s*[:\-]?\s*([0-9.,]+)"),
+        ("freight_term", r"(?:freight\s*term|condição\s*do\s*frete)\s*[:\-]?\s*([^\n]{3,40})"),
+        ("pol", r"(?:port\s*of\s*loading|pol|porto\s*de\s*carregamento)\s*[:\-]?\s*([^\n]{3,40})"),
+        ("pod", r"(?:port\s*of\s*discharge|pod|porto\s*de\s*descarga)\s*[:\-]?\s*([^\n]{3,40})"),
+        ("volume_cbm", r"(?:cbm|cubagem)\s*[:\-]?\s*([0-9.,]+(?:\s*(?:CBM|M3))?)"),
+        ("ncm", r"(?:ncm|ncms|hs\s*code)\s*[:\-]?\s*([0-9]{4,8}(?:\.[0-9]{2})?)"),
     ]
 
-    for field, pattern in document_patterns:
+    for field, pattern in patterns:
         match = re.search(pattern, raw_text, flags=re.IGNORECASE)
         if match:
             resolved[field] = normalize_spaces(match.group(1))
 
-    entity_like = {
-        "shipper": r"(?:shipper|exporter)\s*[:\-]?\s*([^\n]{3,80})",
-        "consignee": r"consignee\s*[:\-]?\s*([^\n]{3,80})",
-        "origin_country": r"country\s*of\s*origin\s*[:\-]?\s*([^\n]{3,40})",
-        "destination_country": r"destination\s*[:\-]?\s*([^\n]{3,40})",
-        "incoterm": r"incoterm\s*[:\-]?\s*([A-Z]{3})",
-        "currency": r"currency\s*[:\-]?\s*([A-Z]{3})",
-        "net_weight": r"net\s*weight\s*[:\-]?\s*([0-9.,]+\s*[A-Za-z]{0,3})",
-        "gross_weight": r"gross\s*weight\s*[:\-]?\s*([0-9.,]+\s*[A-Za-z]{0,3})",
-        "package_count": r"(?:packages?|cartons?)\s*[:\-]?\s*([0-9.,]+)",
-        "total_value": r"(?:total\s*amount|total\s*value|amount\s*due)\s*[:\-]?\s*([0-9.,]+)",
-        "etd": r"etd\s*[:\-]?\s*([0-9/\-.]+)",
-        "eta": r"eta\s*[:\-]?\s*([0-9/\-.]+)",
-    }
-    for field, pattern in entity_like.items():
-        match = re.search(pattern, raw_text, flags=re.IGNORECASE)
-        if match:
-            resolved[field] = normalize_spaces(match.group(1))
+    if resolved.get("invoice_number"):
+        resolved["document_number"] = resolved["invoice_number"]
+
+    for mirror_a, mirror_b in [("issue_or_shipment_date", "etd"), ("shipment_date", "etd")]:
+        if not resolved.get(mirror_a) and resolved.get(mirror_b):
+            resolved[mirror_a] = resolved[mirror_b]
 
     return resolved
 

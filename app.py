@@ -9,9 +9,7 @@ from typing import Any, Dict, List
 
 from flask import Flask, jsonify, make_response, render_template, request
 
-from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
-
-from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
+from extractors.field_extractor import parse_fields
 
 try:
     import pdfplumber
@@ -45,6 +43,31 @@ class DocumentData:
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
 
 
+COMPARATIVE_FIELDS: List[Dict[str, str]] = [
+    {"key": "document_number", "label": "Número do documento"},
+    {"key": "issue_or_shipment_date", "label": "Data de Emissão / Embarque"},
+    {"key": "consignee", "label": "Importador / Consignee"},
+    {"key": "consignee_cnpj", "label": "CNPJ do Importador / Consignee"},
+    {"key": "shipper", "label": "Exportador / Shipper"},
+    {"key": "total_value", "label": "Valor total das invoices"},
+    {"key": "po_number", "label": "Número da Ordem de Compra"},
+    {"key": "goods_description", "label": "Descrição da Mercadoria"},
+    {"key": "freight_value", "label": "Valor do frete"},
+    {"key": "freight_term", "label": "Condição do frete"},
+    {"key": "incoterm", "label": "INCOTERM"},
+    {"key": "origin_country", "label": "País de Origem"},
+    {"key": "provenance_country", "label": "País de Procedência"},
+    {"key": "acquisition_country", "label": "País de Aquisição"},
+    {"key": "pol", "label": "Porto de carregamento (POL)"},
+    {"key": "pod", "label": "Porto de descarga (POD)"},
+    {"key": "net_weight", "label": "Peso líquido total"},
+    {"key": "gross_weight", "label": "Peso bruto total"},
+    {"key": "volume_cbm", "label": "Cubagem"},
+    {"key": "package_count", "label": "Quantidade de Volumes"},
+    {"key": "ncm", "label": "NCMs"},
+]
+
+
 def _extract_text_pdfplumber(content: bytes) -> str:
     if not pdfplumber:
         return ""
@@ -69,6 +92,30 @@ def _extract_text_ocr(content: bytes) -> str:
         text_parts.append(page_text or "")
     return "\n".join(text_parts)
 
+    text_parts: List[str] = []
+    pdf = pdfium.PdfDocument(io.BytesIO(content))
+    for page_index in range(len(pdf)):
+        page = pdf[page_index]
+        image = page.render(scale=2.2).to_pil()
+        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        text_parts.append(page_text or "")
+    return "\n".join(text_parts)
+
+
+def extract_text_from_pdf(content: bytes) -> str:
+    text = _extract_text_pdfplumber(content)
+
+    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
+    if len(normalize_spaces(text)) < 30:
+        ocr_text = _extract_text_ocr(content)
+        if normalize_spaces(ocr_text):
+            return ocr_text
+
+    if not normalize_spaces(text):
+        raise RuntimeError(
+            "Não foi possível extrair texto do PDF. "
+            "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+        )
 
 def extract_text_from_pdf(content: bytes) -> str:
     text = _extract_text_pdfplumber(content)
@@ -113,22 +160,46 @@ def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
     return items[:30]
 
 
+def _get_value_for_comparative_field(doc: DocumentData, doc_type: str, field_key: str) -> str:
+    if field_key == "document_number":
+        fallback_order = {
+            "invoice": ["invoice_number", "document_number"],
+            "packing_list": ["packing_list_number", "document_number"],
+            "bl": ["bl_number", "document_number"],
+        }
+        for key in fallback_order.get(doc_type, ["document_number"]):
+            value = doc.fields.get(key, {}).get("value", "")
+            if value:
+                return value
+        return ""
+
+    if field_key == "issue_or_shipment_date":
+        for key in ["issue_date", "shipment_date", "issue_or_shipment_date", "etd", "eta"]:
+            value = doc.fields.get(key, {}).get("value", "")
+            if value:
+                return value
+        return ""
+
+    return doc.fields.get(field_key, {}).get("value", "")
+
+
 def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     matrix: List[Dict[str, str]] = []
     divergences: List[str] = []
 
-    for field in CANONICAL_FIELDS:
-        row = {"field": field}
+    for field_meta in COMPARATIVE_FIELDS:
+        field_key = field_meta["key"]
+        row = {"field": field_meta["label"]}
         values = []
         for doc_type in ["invoice", "packing_list", "bl"]:
-            field_data = session_docs.get(doc_type).fields.get(field, {}) if session_docs.get(doc_type) else {}
-            val = field_data.get("value", "")
+            doc = session_docs.get(doc_type)
+            val = _get_value_for_comparative_field(doc, doc_type, field_key) if doc else ""
             row[doc_type] = val
             if val:
                 values.append(val.lower())
         matrix.append(row)
         if len(set(values)) > 1:
-            divergences.append(f"Divergência no campo '{field}': valores diferentes entre documentos.")
+            divergences.append(f"Divergência no campo '{field_meta['label']}': valores diferentes entre documentos.")
 
     missing_docs = [doc for doc in ["invoice", "packing_list", "bl"] if doc not in session_docs]
     if missing_docs:
