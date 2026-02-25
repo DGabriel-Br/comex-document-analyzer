@@ -29,3 +29,8 @@ Acesse: `http://localhost:5000`
 ## Observações
 - A extração usa heurísticas de regex sobre o texto do PDF; dependendo do layout dos documentos reais, você pode precisar ajustar os padrões em `FIELD_PATTERNS` no arquivo `app.py`.
 - Para OCR de PDFs digitalizados (imagem), recomenda-se integrar `pytesseract` + `pdf2image` em etapa complementar.
+
+## Configuração de OCR em produção
+- Defina a variável de ambiente `OCR_LANG` para controlar o idioma principal do OCR.
+- Exemplo: `OCR_LANG=por+eng` (padrão) ou `OCR_LANG=eng`.
+- Quando configurado, o sistema tenta primeiro `OCR_LANG` e, em caso de falha do Tesseract, aplica fallback automático para `eng`.

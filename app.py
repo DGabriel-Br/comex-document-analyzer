@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -31,6 +32,7 @@ app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
 
 OCR_CONFIDENCE_THRESHOLD = 0.6
 OCR_MIN_VALID_WORDS_PER_PAGE = 5
+OCR_LANG = (os.getenv("OCR_LANG") or "por+eng").strip() or "por+eng"
 
 
 @dataclass
@@ -102,39 +104,72 @@ def _extract_text_pdfplumber(content: bytes) -> str:
     return "\n".join(text_parts)
 
 
-def _extract_text_ocr(content: bytes) -> str:
+def _get_ocr_lang_fallbacks() -> List[str]:
+    fallbacks = [OCR_LANG]
+    if OCR_LANG != "eng":
+        fallbacks.append("eng")
+    return fallbacks
+
+
+def _extract_text_ocr(content: bytes) -> tuple[str, int, int, List[str]]:
     if not pdfium or not pytesseract:
-        return ""
+        return "", 0, 0, [
+            "OCR indisponível: dependências ausentes (pytesseract e/ou pypdfium2)."
+        ]
 
     text_parts: List[str] = []
+    page_errors: List[str] = []
+    pages_with_text = 0
+    lang_candidates = _get_ocr_lang_fallbacks()
+
     pdf = pdfium.PdfDocument(io.BytesIO(content))
     for page_index in range(len(pdf)):
         page = pdf[page_index]
         image = page.render(scale=2.2).to_pil()
-        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        page_text = ""
+        last_error = ""
+        for lang in lang_candidates:
+            try:
+                page_text = pytesseract.image_to_string(image, lang=lang)
+                break
+            except pytesseract.TesseractError as exc:
+                last_error = str(exc)
+
+        if normalize_spaces(page_text):
+            pages_with_text += 1
+        elif last_error:
+            page_errors.append(
+                f"Página {page_index + 1}: falha no OCR para idiomas {', '.join(lang_candidates)} ({last_error})"
+            )
+
         text_parts.append(page_text or "")
-    return "\n".join(text_parts)
+    return "\n".join(text_parts), pages_with_text, len(pdf), page_errors
 
-        if valid_word_pattern.match(token):
-            valid_words += 1
-            confidences.append(conf_value / 100.0)
 
-def extract_text_from_pdf(content: bytes) -> str:
+def extract_text_from_pdf(content: bytes) -> tuple[str, List[OCRPageMetric], bool, str]:
     text = _extract_text_pdfplumber(content)
 
     # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
     if len(normalize_spaces(text)) < 30:
-        ocr_text = _extract_text_ocr(content)
+        ocr_text, pages_with_text, total_pages, page_errors = _extract_text_ocr(content)
         if normalize_spaces(ocr_text):
-            return ocr_text
+            return ocr_text, [], False, "ocr"
 
     if not normalize_spaces(text):
+        diagnostic = (
+            "Não foi possível extrair texto do PDF: nenhuma página retornou texto via extração direta ou OCR. "
+            f"OCR_LANG={OCR_LANG!r}, fallback={_get_ocr_lang_fallbacks()}"
+        )
+        if total_pages:
+            diagnostic += f", páginas com texto via OCR={pages_with_text}/{total_pages}"
+        if page_errors:
+            diagnostic += f". Último erro: {page_errors[-1]}"
         raise RuntimeError(
-            "Não foi possível extrair texto do PDF. "
-            "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+            f"{diagnostic}. "
+            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract) e ajuste OCR_LANG se necessário."
         )
 
-    return text
+    return text, [], False, "pdf_text"
 
 
 def normalize_spaces(value: str) -> str:
