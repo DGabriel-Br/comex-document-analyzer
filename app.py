@@ -82,21 +82,68 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
 ]
 
 
+def _render_page_to_pil(page):
+    last_error = None
+    render_attempts = [
+        {"scale": 2.2},
+        {"scale": 2.0, "rotation": 0},
+        {"scale": 1.5},
+    ]
+
+    for kwargs in render_attempts:
+        try:
+            bitmap = page.render(**kwargs)
+            if bitmap is None:
+                continue
+            image = bitmap.to_pil()
+            if image is not None:
+                return image
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            continue
+
+    if last_error:
+        raise RuntimeError(f"Falha ao renderizar página para OCR: {last_error}")
+    raise RuntimeError("Falha ao renderizar página para OCR: resultado vazio.")
+
+
 def _extract_text_pdf_ocr(content: bytes) -> str:
     if not pdfium or not pytesseract:
         return ""
 
     text_parts: List[str] = []
     pdf = pdfium.PdfDocument(io.BytesIO(content))
-    for page_index in range(len(pdf)):
-        page = pdf[page_index]
-        image = page.render(scale=2.2).to_pil()
+    page_errors: List[str] = []
+
+    try:
+        for page_index in range(len(pdf)):
+            page = pdf[page_index]
+            try:
+                image = _render_page_to_pil(page)
+                try:
+                    page_text = pytesseract.image_to_string(image, lang=OCR_LANG)
+                except Exception:
+                    page_text = pytesseract.image_to_string(image, lang="eng")
+                text_parts.append(page_text or "")
+            except Exception as exc:  # pragma: no cover
+                page_errors.append(f"página {page_index + 1}: {exc}")
+                text_parts.append("")
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+    finally:
         try:
-            page_text = pytesseract.image_to_string(image, lang=OCR_LANG)
+            pdf.close()
         except Exception:
-            page_text = pytesseract.image_to_string(image, lang="eng")
-        text_parts.append(page_text or "")
-    return "\n".join(text_parts)
+            pass
+
+    combined = "\n".join(text_parts)
+    if not normalize_spaces(combined) and page_errors:
+        raise RuntimeError("; ".join(page_errors))
+
+    return combined
 
 
 def extract_text_from_pdf(content: bytes) -> str:
@@ -110,7 +157,9 @@ def extract_text_from_pdf(content: bytes) -> str:
 
     return text
 
-    return text
+
+def normalize_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def extract_text_from_pdf(content: bytes) -> str:
