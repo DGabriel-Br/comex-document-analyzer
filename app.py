@@ -3,13 +3,15 @@ from __future__ import annotations
 import io
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List
+from statistics import mean
+from typing import Any, Dict, List, Tuple
 
 from flask import Flask, jsonify, make_response, render_template, request
 
 from extractors.field_extractor import parse_fields
+from extractors.ocr_pipeline import preprocess_for_ocr
 
 try:
     import pdfplumber
@@ -29,6 +31,18 @@ except Exception:  # pragma: no cover
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
 
+OCR_CONFIDENCE_THRESHOLD = 0.6
+OCR_MIN_VALID_WORDS_PER_PAGE = 5
+
+
+@dataclass
+class OCRPageMetric:
+    page_number: int
+    characters: int
+    valid_words: int
+    estimated_confidence: float
+    rotation_applied: float
+
 
 @dataclass
 class DocumentData:
@@ -38,6 +52,9 @@ class DocumentData:
     raw_text_preview: str
     fields: Dict[str, Dict[str, Any]]
     line_items: List[Dict[str, str]]
+    extraction_method: str
+    low_ocr_confidence: bool
+    ocr_quality: List[OCRPageMetric] = field(default_factory=list)
 
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
@@ -79,37 +96,81 @@ def _extract_text_pdfplumber(content: bytes) -> str:
     return "\n".join(text_parts)
 
 
-def _extract_text_ocr(content: bytes) -> str:
+def _score_ocr_page(page_text: str, tsv_data: Dict[str, List[str]]) -> Tuple[int, int, float]:
+    valid_word_pattern = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ0-9][A-Za-zÀ-ÖØ-öø-ÿ0-9\-./]{1,}$")
+
+    confidences: List[float] = []
+    valid_words = 0
+    words = tsv_data.get("text", [])
+    confs = tsv_data.get("conf", [])
+
+    for word, conf in zip(words, confs):
+        token = normalize_spaces(word)
+        if not token:
+            continue
+        try:
+            conf_value = float(conf)
+        except (TypeError, ValueError):
+            continue
+        if conf_value < 0:
+            continue
+
+        if valid_word_pattern.match(token):
+            valid_words += 1
+            confidences.append(conf_value / 100.0)
+
+    estimated_confidence = mean(confidences) if confidences else 0.0
+    return len(page_text), valid_words, round(estimated_confidence, 4)
+
+
+def _extract_text_ocr(content: bytes) -> Tuple[str, List[OCRPageMetric], bool]:
     if not pdfium or not pytesseract:
-        return ""
+        return "", [], False
 
     text_parts: List[str] = []
+    page_metrics: List[OCRPageMetric] = []
     pdf = pdfium.PdfDocument(io.BytesIO(content))
+
     for page_index in range(len(pdf)):
         page = pdf[page_index]
         image = page.render(scale=2.2).to_pil()
-        page_text = pytesseract.image_to_string(image, lang="por+eng")
+        processed_image, rotation = preprocess_for_ocr(image)
+
+        page_text = pytesseract.image_to_string(processed_image, lang="por+eng")
+        tsv_data = pytesseract.image_to_data(
+            processed_image,
+            lang="por+eng",
+            output_type=pytesseract.Output.DICT,
+        )
+        characters, valid_words, confidence = _score_ocr_page(page_text or "", tsv_data)
+
+        page_metrics.append(
+            OCRPageMetric(
+                page_number=page_index + 1,
+                characters=characters,
+                valid_words=valid_words,
+                estimated_confidence=confidence,
+                rotation_applied=rotation,
+            )
+        )
         text_parts.append(page_text or "")
-    return "\n".join(text_parts)
 
-    text_parts: List[str] = []
-    pdf = pdfium.PdfDocument(io.BytesIO(content))
-    for page_index in range(len(pdf)):
-        page = pdf[page_index]
-        image = page.render(scale=2.2).to_pil()
-        page_text = pytesseract.image_to_string(image, lang="por+eng")
-        text_parts.append(page_text or "")
-    return "\n".join(text_parts)
+    low_confidence = any(
+        metric.estimated_confidence < OCR_CONFIDENCE_THRESHOLD
+        or metric.valid_words < OCR_MIN_VALID_WORDS_PER_PAGE
+        for metric in page_metrics
+    )
+
+    return "\n".join(text_parts), page_metrics, low_confidence
 
 
-def extract_text_from_pdf(content: bytes) -> str:
+def extract_text_from_pdf(content: bytes) -> Tuple[str, List[OCRPageMetric], bool, str]:
     text = _extract_text_pdfplumber(content)
 
-    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
     if len(normalize_spaces(text)) < 30:
-        ocr_text = _extract_text_ocr(content)
+        ocr_text, ocr_quality, low_ocr_confidence = _extract_text_ocr(content)
         if normalize_spaces(ocr_text):
-            return ocr_text
+            return ocr_text, ocr_quality, low_ocr_confidence, "ocr"
 
     if not normalize_spaces(text):
         raise RuntimeError(
@@ -117,22 +178,7 @@ def extract_text_from_pdf(content: bytes) -> str:
             "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
         )
 
-def extract_text_from_pdf(content: bytes) -> str:
-    text = _extract_text_pdfplumber(content)
-
-    # Fallback OCR para PDFs escaneados (texto inexistente/insuficiente)
-    if len(normalize_spaces(text)) < 30:
-        ocr_text = _extract_text_ocr(content)
-        if normalize_spaces(ocr_text):
-            return ocr_text
-
-    if not normalize_spaces(text):
-        raise RuntimeError(
-            "Não foi possível extrair texto do PDF. "
-            "Se for documento escaneado, valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
-        )
-
-    return text
+    return text, [], False, "pdfplumber"
 
 
 def normalize_spaces(value: str) -> str:
@@ -145,7 +191,6 @@ def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
         clean = normalize_spaces(line)
         if not clean:
             continue
-        # Heurística para linhas de item: código + descrição + quantidade e valor ao final
         if re.search(r"\b\d+(?:[.,]\d+)?\b", clean) and len(clean.split()) >= 4:
             qty_match = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(pcs|kg|ctn|box|un)?\b", clean, re.IGNORECASE)
             val_match = re.search(r"(\d+[.,]\d{2})\s*$", clean)
@@ -205,6 +250,12 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     if missing_docs:
         divergences.append(f"Pendência: documentos ausentes para análise cruzada: {', '.join(missing_docs)}")
 
+    low_quality_docs = [doc.doc_type for doc in session_docs.values() if doc.low_ocr_confidence]
+    if low_quality_docs:
+        divergences.append(
+            f"Alerta de OCR: baixa confiabilidade detectada em {', '.join(low_quality_docs)}. Revisão manual recomendada."
+        )
+
     status = "Aprovado" if not divergences else "Com divergências"
     return {"status": status, "matrix": matrix, "divergences": divergences}
 
@@ -236,7 +287,7 @@ def process_doc(doc_type: str):
 
     content = file.read()
     try:
-        text = extract_text_from_pdf(content)
+        text, ocr_quality, low_ocr_confidence, extraction_method = extract_text_from_pdf(content)
     except Exception as exc:
         return jsonify({"error": f"Falha ao extrair texto do PDF: {exc}"}), 500
 
@@ -247,6 +298,9 @@ def process_doc(doc_type: str):
         raw_text_preview=text[:1500],
         fields=parse_fields(text),
         line_items=parse_line_items(text),
+        extraction_method=extraction_method,
+        low_ocr_confidence=low_ocr_confidence,
+        ocr_quality=ocr_quality,
     )
     SESSIONS[sid][doc_type] = doc
 

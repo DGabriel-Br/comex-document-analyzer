@@ -64,7 +64,40 @@
   {% for doc_type, doc in report.documents.items() %}
   <div class="doc">
     <h3>{{ doc_type }}</h3>
-    <div class="muted">Arquivo: {{ doc.filename }} | Extraído em: {{ doc.extracted_at }}</div>
+    <div class="muted">Arquivo: {{ doc.filename }} | Extraído em: {{ doc.extracted_at }} | Método: {{ doc.extraction_method }}</div>
+    <div>
+      <strong>Baixa confiabilidade OCR:</strong>
+      <span class="badge {{ 'warn' if doc.low_ocr_confidence else 'ok' }}">{{ 'Sim' if doc.low_ocr_confidence else 'Não' }}</span>
+    </div>
+
+    <h3>Qualidade OCR</h3>
+    {% if doc.ocr_quality %}
+    <table>
+      <thead>
+        <tr>
+          <th>Página</th>
+          <th>Caracteres</th>
+          <th>Palavras válidas</th>
+          <th>Confiança estimada</th>
+          <th>Rotação corrigida (graus)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for metric in doc.ocr_quality %}
+        <tr>
+          <td>{{ metric.page_number }}</td>
+          <td>{{ metric.characters }}</td>
+          <td>{{ metric.valid_words }}</td>
+          <td>{{ '%.2f'|format(metric.estimated_confidence * 100) }}%</td>
+          <td>{{ metric.rotation_applied }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="muted">Não aplicável (texto extraído diretamente do PDF).</div>
+    {% endif %}
+
     <table>
       <thead>
         <tr>
