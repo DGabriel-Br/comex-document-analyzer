@@ -11,6 +11,8 @@ from flask import Flask, jsonify, make_response, render_template, request
 
 from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
 
+from extractors.field_extractor import CANONICAL_FIELDS, parse_fields
+
 try:
     import pdfplumber
 except Exception:  # pragma: no cover
