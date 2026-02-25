@@ -4,7 +4,7 @@ import io
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -110,18 +110,11 @@ def extract_text_from_pdf(content: bytes) -> str:
 
     return text
 
+    return text
+
 
 def extract_text_from_pdf(content: bytes) -> str:
     text = _extract_text_pdf_ocr(content)
-
-    if not normalize_spaces(text):
-        raise RuntimeError(
-            "Não foi possível extrair texto do PDF via OCR. "
-            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
-        )
-
-    return text
-
 
 def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
