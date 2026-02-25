@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Relatório de Análise Documental</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; color: #111827; }
+    h1, h2, h3 { margin: 0 0 12px; }
+    .meta { margin-bottom: 20px; color: #374151; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; }
+    th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; font-size: 14px; }
+    th { background: #f3f4f6; }
+    .badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+    .ok { background: #dcfce7; color: #166534; }
+    .warn { background: #fef3c7; color: #92400e; }
+    .doc { margin-bottom: 24px; }
+    .muted { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>Relatório de Análise Documental</h1>
+  <div class="meta">
+    <div><strong>Gerado em:</strong> {{ report.generated_at }}</div>
+    <div><strong>Status:</strong>
+      <span class="badge {{ 'ok' if report.analysis.status == 'Aprovado' else 'warn' }}">{{ report.analysis.status }}</span>
+    </div>
+  </div>
+
+  <h2>Quadro Comparativo</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Campo</th>
+        <th>Invoice</th>
+        <th>Packing List</th>
+        <th>B/L</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in report.analysis.matrix %}
+      <tr>
+        <td>{{ row.field }}</td>
+        <td>{{ row.invoice or '-' }}</td>
+        <td>{{ row.packing_list or '-' }}</td>
+        <td>{{ row.bl or '-' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Divergências e Pendências</h2>
+  <ul>
+    {% if report.analysis.divergences %}
+      {% for item in report.analysis.divergences %}
+      <li>{{ item }}</li>
+      {% endfor %}
+    {% else %}
+      <li>Nenhuma divergência identificada.</li>
+    {% endif %}
+  </ul>
+
+  <h2>Detalhe por Documento</h2>
+  {% for doc_type, doc in report.documents.items() %}
+  <div class="doc">
+    <h3>{{ doc_type }}</h3>
+    <div class="muted">Arquivo: {{ doc.filename }} | Extraído em: {{ doc.extracted_at }}</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Campo</th>
+          <th>Valor</th>
+          <th>Camada</th>
+          <th>Confiança</th>
+          <th>Revisão</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for field, payload in doc.fields.items() %}
+        <tr>
+          <td>{{ field }}</td>
+          <td>{{ payload.value or '-' }}</td>
+          <td>{{ payload.source_layer }}</td>
+          <td>{{ payload.confidence }}</td>
+          <td>{{ 'Sim' if payload.pending_review else 'Não' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+</body>
+</html>
