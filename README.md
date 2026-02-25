@@ -11,7 +11,7 @@ Sistema web para análise documental de importação (Invoice, Packing List e Bi
 
 ## Stack
 - Backend: Flask
-- Parsing de PDF: pdfplumber
+- Parsing de PDF: OCR com pypdfium2 + pytesseract
 - Frontend: HTML/CSS/JavaScript
 
 ## Como executar
@@ -27,5 +27,5 @@ Acesse: `http://localhost:5000`
 `invoice_number`, `packing_list_number`, `bl_number`, `po_number`, `shipper`, `consignee`, `origin_country`, `destination_country`, `incoterm`, `currency`, `package_count`, `net_weight`, `gross_weight`, `total_value`, `etd`, `eta`.
 
 ## Observações
-- A extração usa heurísticas de regex sobre o texto do PDF; dependendo do layout dos documentos reais, você pode precisar ajustar os padrões em `FIELD_PATTERNS` no arquivo `app.py`.
-- Para OCR de PDFs digitalizados (imagem), recomenda-se integrar `pytesseract` + `pdf2image` em etapa complementar.
+- A extração de texto é feita via OCR (pypdfium2 + pytesseract) e o parser em camadas está em `extractors/field_extractor.py`.
+- É necessário ter o binário do Tesseract instalado no sistema para OCR funcionar.
