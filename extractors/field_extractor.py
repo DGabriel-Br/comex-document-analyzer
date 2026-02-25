@@ -143,6 +143,7 @@ ALIASES: Dict[str, List[str]] = {
     "gross_weight": ["gross weight", "peso bruto", "g.w.", "gw"],
     "volume_cbm": ["cbm", "cubagem", "volume"],
     "package_count": ["total packages", "packages", "quantidade de volumes", "cartons", "no. of packages"],
+    "package_count": ["total packages", "packages", "quantidade de volumes", "cartons"],
     "ncm": ["ncm", "ncms", "hs code", "hscode"],
     "total_value": ["total amount", "total value", "amount due", "invoice total"],
     "etd": ["etd", "estimated time of departure", "departure date"],

@@ -29,6 +29,18 @@ except Exception:  # pragma: no cover
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
 
+OCR_CONFIDENCE_THRESHOLD = 0.6
+OCR_MIN_VALID_WORDS_PER_PAGE = 5
+
+
+@dataclass
+class OCRPageMetric:
+    page_number: int
+    characters: int
+    valid_words: int
+    estimated_confidence: float
+    rotation_applied: float
+
 
 @dataclass
 class DocumentData:
@@ -38,6 +50,9 @@ class DocumentData:
     raw_text_preview: str
     fields: Dict[str, Dict[str, Any]]
     line_items: List[Dict[str, str]]
+    extraction_method: str
+    low_ocr_confidence: bool
+    ocr_quality: List[OCRPageMetric] = field(default_factory=list)
 
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
@@ -92,6 +107,9 @@ def _extract_text_ocr(content: bytes) -> str:
         text_parts.append(page_text or "")
     return "\n".join(text_parts)
 
+        if valid_word_pattern.match(token):
+            valid_words += 1
+            confidences.append(conf_value / 100.0)
 
 def extract_text_from_pdf(content: bytes) -> str:
     text = _extract_text_pdfplumber(content)
@@ -121,7 +139,6 @@ def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
         clean = normalize_spaces(line)
         if not clean:
             continue
-        # Heurística para linhas de item: código + descrição + quantidade e valor ao final
         if re.search(r"\b\d+(?:[.,]\d+)?\b", clean) and len(clean.split()) >= 4:
             qty_match = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(pcs|kg|ctn|box|un)?\b", clean, re.IGNORECASE)
             val_match = re.search(r"(\d+[.,]\d{2})\s*$", clean)
@@ -181,6 +198,12 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     if missing_docs:
         divergences.append(f"Pendência: documentos ausentes para análise cruzada: {', '.join(missing_docs)}")
 
+    low_quality_docs = [doc.doc_type for doc in session_docs.values() if doc.low_ocr_confidence]
+    if low_quality_docs:
+        divergences.append(
+            f"Alerta de OCR: baixa confiabilidade detectada em {', '.join(low_quality_docs)}. Revisão manual recomendada."
+        )
+
     status = "Aprovado" if not divergences else "Com divergências"
     return {"status": status, "matrix": matrix, "divergences": divergences}
 
@@ -212,7 +235,7 @@ def process_doc(doc_type: str):
 
     content = file.read()
     try:
-        text = extract_text_from_pdf(content)
+        text, ocr_quality, low_ocr_confidence, extraction_method = extract_text_from_pdf(content)
     except Exception as exc:
         return jsonify({"error": f"Falha ao extrair texto do PDF: {exc}"}), 500
 
@@ -223,6 +246,9 @@ def process_doc(doc_type: str):
         raw_text_preview=text[:1500],
         fields=parse_fields(text, doc_type=doc_type),
         line_items=parse_line_items(text),
+        extraction_method=extraction_method,
+        low_ocr_confidence=low_ocr_confidence,
+        ocr_quality=ocr_quality,
     )
     SESSIONS[sid][doc_type] = doc
 
