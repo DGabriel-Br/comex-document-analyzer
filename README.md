@@ -15,7 +15,7 @@ Sistema web para análise documental de importação (Invoice, Packing List e Bi
 
 ## Stack
 - Backend: Flask
-- Parsing de PDF: OCR com pypdfium2 + pytesseract
+- Parsing de PDF: OCR com pypdfium2 + pytesseract + Pillow
 - Frontend: HTML/CSS/JavaScript
 
 ## Como executar
@@ -33,6 +33,7 @@ Para habilitar OCR de PDFs digitalizados (imagem), é necessário:
 1. **Pacotes Python** (já em `requirements.txt`):
    - `pytesseract`
    - `pypdfium2`
+   - `Pillow`
 2. **Binário de sistema**:
    - `tesseract` instalado e disponível no `PATH`.
 
