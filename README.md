@@ -15,7 +15,7 @@ Sistema web para análise documental de importação (Invoice, Packing List e Bi
 
 ## Stack
 - Backend: Flask
-- Parsing de PDF: OCR com pypdfium2 + pytesseract + Pillow
+- Parsing de PDF: OCR com pypdfium2 + pytesseract
 - Frontend: HTML/CSS/JavaScript
 
 ## Como executar
@@ -108,9 +108,4 @@ Estrutura retornada por `parse_fields` (com metadados de camada e confiança):
 
 ## Observações
 - A extração de texto é feita via OCR (pypdfium2 + pytesseract) e o parser em camadas está em `extractors/field_extractor.py`.
-- Campos com `source_layer: "ignored"` indicam itens propositalmente não aplicáveis para aquele documento (sem pendência).
-- Campos com `source_layer: "unresolved"` indicam que a extração não encontrou valor confiável (normalmente com `pending_review: true`).
-- Todo campo extraído inclui metadados operacionais: `source_layer`, `confidence` e `pending_review`.
-- Para OCR funcionar em produção/desenvolvimento é obrigatório ter **ambos**:
-  - dependências Python instaladas (`pytesseract` + `pypdfium2`);
-  - binário de sistema `tesseract` disponível no `PATH`.
+- É necessário ter o binário do Tesseract instalado no sistema para OCR funcionar.

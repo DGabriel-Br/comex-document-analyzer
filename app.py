@@ -4,7 +4,7 @@ import io
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -86,14 +86,44 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
     {"key": "ncm", "label": "NCMs"},
 ]
 
-DOC_TYPES = ["invoice", "packing_list", "bl"]
-MIN_COMPARATIVE_COMPLETENESS_RATIO = 0.55
-MIN_REQUIRED_COMPLETENESS_RATIO = 0.8
-REQUIRED_FIELDS_BY_DOC: Dict[str, List[str]] = {
-    "invoice": ["document_number", "issue_or_shipment_date", "consignee", "total_value", "incoterm"],
-    "packing_list": ["document_number", "issue_or_shipment_date", "consignee", "gross_weight", "package_count"],
-    "bl": ["document_number", "issue_or_shipment_date", "consignee", "pol", "pod"],
-}
+
+def _extract_text_pdfium_native(content: bytes) -> str:
+    if not pdfium:
+        return ""
+
+    snippets: List[str] = []
+    try:
+        pdf = pdfium.PdfDocument(io.BytesIO(content))
+    except Exception:
+        return ""
+
+    try:
+        for page_index in range(len(pdf)):
+            page = pdf[page_index]
+            text_page = None
+            try:
+                text_page = page.get_textpage()
+                text = text_page.get_text_range() or ""
+                snippets.append(text)
+            except Exception:
+                snippets.append("")
+            finally:
+                try:
+                    if text_page is not None:
+                        text_page.close()
+                except Exception:
+                    pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
+    finally:
+        try:
+            pdf.close()
+        except Exception:
+            pass
+
+    return "\n".join(snippets)
 
 
 def _bitmap_to_pil(bitmap):
@@ -108,6 +138,10 @@ def _bitmap_to_pil(bitmap):
         try:
             arr = bitmap.to_numpy()
             if arr is not None:
+                if getattr(arr, "ndim", 0) > 3:
+                    arr = arr[..., :3]
+                if getattr(arr, "ndim", 0) == 3 and arr.shape[-1] > 4:
+                    arr = arr[..., :3]
                 return Image.fromarray(arr)
         except Exception:
             pass
@@ -121,7 +155,6 @@ def _render_page_to_pil(page):
         {"scale": 2.2},
         {"scale": 2.0, "rotation": 0},
         {"scale": 1.5},
-        {"scale": 2.0, "rotation": 0, "prefer_bgrx": True},
     ]
 
     for kwargs in render_attempts:
@@ -146,12 +179,7 @@ def _extract_text_pdf_ocr(content: bytes) -> str:
         return ""
 
     text_parts: List[str] = []
-    pdf = None
-    try:
-        pdf = pdfium.PdfDocument(io.BytesIO(content))
-    except Exception as exc:
-        raise RuntimeError("Falha ao abrir PDF para OCR.") from exc
-
+    pdf = pdfium.PdfDocument(io.BytesIO(content))
     page_errors: List[str] = []
 
     try:
@@ -173,11 +201,10 @@ def _extract_text_pdf_ocr(content: bytes) -> str:
                 except Exception:
                     pass
     finally:
-        if pdf is not None:
-            try:
-                pdf.close()
-            except Exception:
-                pass
+        try:
+            pdf.close()
+        except Exception:
+            pass
 
     combined = "\n".join(text_parts)
     if not normalize_spaces(combined) and page_errors:
@@ -187,12 +214,16 @@ def _extract_text_pdf_ocr(content: bytes) -> str:
 
 
 def extract_text_from_pdf(content: bytes) -> str:
+    native_text = _extract_text_pdfium_native(content)
+    if len(normalize_spaces(native_text)) >= 30:
+        return native_text
+
     text = _extract_text_pdf_ocr(content)
 
     if not normalize_spaces(text):
         raise RuntimeError(
-            "Não foi possível extrair texto do PDF via OCR. "
-            "Valide se OCR está disponível (pytesseract + pypdfium2 + binário tesseract)."
+            "Não foi possível extrair texto do PDF. "
+            "Tentamos extração nativa e OCR, mas o arquivo retornou erro de renderização/texto."
         )
 
     return text
