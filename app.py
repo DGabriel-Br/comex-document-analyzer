@@ -86,6 +86,15 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
     {"key": "ncm", "label": "NCMs"},
 ]
 
+DOC_TYPES = ["invoice", "packing_list", "bl"]
+MIN_COMPARATIVE_COMPLETENESS_RATIO = 0.55
+MIN_REQUIRED_COMPLETENESS_RATIO = 0.8
+REQUIRED_FIELDS_BY_DOC: Dict[str, List[str]] = {
+    "invoice": ["document_number", "issue_or_shipment_date", "consignee", "total_value", "incoterm"],
+    "packing_list": ["document_number", "issue_or_shipment_date", "consignee", "gross_weight", "package_count"],
+    "bl": ["document_number", "issue_or_shipment_date", "consignee", "pol", "pod"],
+}
+
 
 def _bitmap_to_pil(bitmap):
     try:
@@ -237,9 +246,14 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
         doc_type: {
             "total_comparative_fields": len(COMPARATIVE_FIELDS),
             "filled_comparative_fields": 0,
-            "completeness_ratio": 0.0,
-            "minimum_ratio": MIN_COMPLETENESS_RATIO,
+            "comparative_completeness_ratio": 0.0,
+            "minimum_comparative_ratio": MIN_COMPARATIVE_COMPLETENESS_RATIO,
+            "total_required_fields": len(REQUIRED_FIELDS_BY_DOC.get(doc_type, [])),
+            "filled_required_fields": 0,
+            "required_completeness_ratio": 0.0,
+            "minimum_required_ratio": MIN_REQUIRED_COMPLETENESS_RATIO,
             "below_minimum": False,
+            "below_required_minimum": False,
             "required_fields": REQUIRED_FIELDS_BY_DOC.get(doc_type, []),
             "missing_required_fields": [],
             "document_present": doc_type in session_docs,
@@ -267,6 +281,7 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     if missing_docs:
         divergences.append(f"Pendência: documentos ausentes para análise cruzada: {', '.join(missing_docs)}")
 
+    low_completeness_detected = False
     for doc_type in DOC_TYPES:
         metrics = doc_completeness[doc_type]
         if not metrics["document_present"]:
@@ -274,8 +289,8 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
 
         total_fields = metrics["total_comparative_fields"]
         filled_fields = metrics["filled_comparative_fields"]
-        metrics["completeness_ratio"] = (filled_fields / total_fields) if total_fields else 0.0
-        metrics["below_minimum"] = metrics["completeness_ratio"] < MIN_COMPLETENESS_RATIO
+        metrics["comparative_completeness_ratio"] = (filled_fields / total_fields) if total_fields else 0.0
+        metrics["below_minimum"] = metrics["comparative_completeness_ratio"] < MIN_COMPARATIVE_COMPLETENESS_RATIO
 
         missing_required_fields = []
         for required_field in metrics["required_fields"]:
@@ -284,12 +299,31 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
             if not value:
                 missing_required_fields.append(required_field)
         metrics["missing_required_fields"] = missing_required_fields
+        total_required_fields = metrics["total_required_fields"]
+        metrics["filled_required_fields"] = total_required_fields - len(missing_required_fields)
+        metrics["required_completeness_ratio"] = (
+            metrics["filled_required_fields"] / total_required_fields if total_required_fields else 1.0
+        )
+        metrics["below_required_minimum"] = (
+            metrics["required_completeness_ratio"] < MIN_REQUIRED_COMPLETENESS_RATIO
+        )
 
         if metrics["below_minimum"]:
+            low_completeness_detected = True
             divergences.append(
                 "Pendência de completude: "
                 f"{doc_type} com {filled_fields}/{total_fields} campos comparativos preenchidos "
-                f"({metrics['completeness_ratio']:.0%}), abaixo do mínimo de {MIN_COMPLETENESS_RATIO:.0%}."
+                f"({metrics['comparative_completeness_ratio']:.0%}), "
+                f"abaixo do mínimo de {MIN_COMPARATIVE_COMPLETENESS_RATIO:.0%}."
+            )
+
+        if metrics["below_required_minimum"]:
+            low_completeness_detected = True
+            divergences.append(
+                "Pendência de completude obrigatória: "
+                f"{doc_type} com {metrics['filled_required_fields']}/{total_required_fields} campos obrigatórios preenchidos "
+                f"({metrics['required_completeness_ratio']:.0%}), "
+                f"abaixo do mínimo de {MIN_REQUIRED_COMPLETENESS_RATIO:.0%}."
             )
 
         if missing_required_fields:
@@ -304,7 +338,7 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
             f"Alerta de OCR: baixa confiabilidade detectada em {', '.join(low_quality_docs)}. Revisão manual recomendada."
         )
 
-    status = "Aprovado" if not divergences else "Com divergências"
+    status = "Com divergências" if divergences or low_completeness_detected else "Aprovado"
     return {
         "status": status,
         "matrix": matrix,

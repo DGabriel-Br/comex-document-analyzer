@@ -60,6 +60,40 @@
     {% endif %}
   </ul>
 
+  <h2>Indicadores de Completude</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Documento</th>
+        <th>Campos comparativos preenchidos</th>
+        <th>Completude comparativa</th>
+        <th>Campos obrigatórios preenchidos</th>
+        <th>Completude obrigatória</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for doc_type, metrics in report.analysis.completeness.items() %}
+      <tr>
+        <td>{{ doc_type }}</td>
+        {% if metrics.document_present %}
+          <td>
+            {{ metrics.filled_comparative_fields }}/{{ metrics.total_comparative_fields }}
+            {% if metrics.below_minimum %}<span class="badge warn">Abaixo do mínimo</span>{% endif %}
+          </td>
+          <td>{{ (metrics.comparative_completeness_ratio * 100) | round(0) }}% (mín. {{ (metrics.minimum_comparative_ratio * 100) | round(0) }}%)</td>
+          <td>
+            {{ metrics.filled_required_fields }}/{{ metrics.total_required_fields }}
+            {% if metrics.below_required_minimum %}<span class="badge warn">Abaixo do mínimo</span>{% endif %}
+          </td>
+          <td>{{ (metrics.required_completeness_ratio * 100) | round(0) }}% (mín. {{ (metrics.minimum_required_ratio * 100) | round(0) }}%)</td>
+        {% else %}
+          <td colspan="4" class="muted">Documento não enviado</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
   <h2>Detalhe por Documento</h2>
   {% for doc_type, doc in report.documents.items() %}
   <div class="doc">
