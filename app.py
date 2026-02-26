@@ -4,7 +4,7 @@ import io
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -54,7 +54,7 @@ class DocumentData:
     line_items: List[Dict[str, str]]
     extraction_method: str
     low_ocr_confidence: bool
-    ocr_quality: List[OCRPageMetric] = field(default_factory=list)
+    ocr_quality: List[OCRPageMetric]
 
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
