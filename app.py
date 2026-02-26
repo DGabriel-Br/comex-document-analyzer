@@ -10,6 +10,11 @@ from typing import Any, Dict, List
 
 from flask import Flask, jsonify, make_response, render_template, request
 
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover
+    Image = None
+
 from extractors.field_extractor import parse_fields
 
 try:
@@ -82,12 +87,32 @@ COMPARATIVE_FIELDS: List[Dict[str, str]] = [
 ]
 
 
+def _bitmap_to_pil(bitmap):
+    try:
+        image = bitmap.to_pil()
+        if image is not None:
+            return image
+    except Exception:
+        pass
+
+    if Image is not None:
+        try:
+            arr = bitmap.to_numpy()
+            if arr is not None:
+                return Image.fromarray(arr)
+        except Exception:
+            pass
+
+    return None
+
+
 def _render_page_to_pil(page):
     last_error = None
     render_attempts = [
         {"scale": 2.2},
         {"scale": 2.0, "rotation": 0},
         {"scale": 1.5},
+        {"scale": 2.0, "rotation": 0, "prefer_bgrx": True},
     ]
 
     for kwargs in render_attempts:
@@ -95,7 +120,7 @@ def _render_page_to_pil(page):
             bitmap = page.render(**kwargs)
             if bitmap is None:
                 continue
-            image = bitmap.to_pil()
+            image = _bitmap_to_pil(bitmap)
             if image is not None:
                 return image
         except Exception as exc:  # pragma: no cover
@@ -161,9 +186,6 @@ def extract_text_from_pdf(content: bytes) -> str:
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
-
-def extract_text_from_pdf(content: bytes) -> str:
-    text = _extract_text_pdf_ocr(content)
 
 def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
