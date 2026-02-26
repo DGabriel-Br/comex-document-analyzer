@@ -1,6 +1,6 @@
 # comex-document-analyzer
 
-Sistema web para análise documental de importação (Invoice, Packing List e Bill of Lading) com extração de dados em JSON e conferência cruzada.
+Sistema web para análise documental de importação (Invoice, Packing List e Bill of Lading) com extração estruturada de dados e conferência cruzada, gerando relatório consolidado em HTML.
 
 ## Funcionalidades
 - Upload individual para Invoice, Packing List e B/L em PDF.
@@ -44,7 +44,29 @@ sudo apt-get install -y tesseract-ocr tesseract-ocr-por tesseract-ocr-eng
 ```
 
 ## Campos comparados (`COMPARATIVE_FIELDS`)
-`document_number`, `issue_or_shipment_date`, `consignee`, `consignee_cnpj`, `shipper`, `total_value`, `po_number`, `goods_description`, `freight_value`, `freight_term`, `incoterm`, `origin_country`, `provenance_country`, `acquisition_country`, `pol`, `pod`, `net_weight`, `gross_weight`, `volume_cbm`, `package_count`, `ncm`.
+Lista efetiva utilizada pelo backend (`app.py`):
+
+- `document_number` — Número do documento
+- `issue_or_shipment_date` — Data de Emissão / Embarque
+- `consignee` — Importador / Consignee
+- `consignee_cnpj` — CNPJ do Importador / Consignee
+- `shipper` — Exportador / Shipper
+- `total_value` — Valor total das invoices
+- `po_number` — Número da Ordem de Compra
+- `goods_description` — Descrição da Mercadoria
+- `freight_value` — Valor do frete
+- `freight_term` — Condição do frete
+- `incoterm` — INCOTERM
+- `origin_country` — País de Origem
+- `provenance_country` — País de Procedência
+- `acquisition_country` — País de Aquisição
+- `pol` — Porto de carregamento (POL)
+- `pod` — Porto de descarga (POD)
+- `net_weight` — Peso líquido total
+- `gross_weight` — Peso bruto total
+- `volume_cbm` — Cubagem
+- `package_count` — Quantidade de Volumes
+- `ncm` — NCMs
 
 ## Exemplo de payload de campos extraídos
 Estrutura retornada por `parse_fields` (com metadados de camada e confiança):
@@ -86,4 +108,9 @@ Estrutura retornada por `parse_fields` (com metadados de camada e confiança):
 
 ## Observações
 - A extração de texto é feita via OCR (pypdfium2 + pytesseract) e o parser em camadas está em `extractors/field_extractor.py`.
-- É necessário ter o binário do Tesseract instalado no sistema para OCR funcionar.
+- Campos com `source_layer: "ignored"` indicam itens propositalmente não aplicáveis para aquele documento (sem pendência).
+- Campos com `source_layer: "unresolved"` indicam que a extração não encontrou valor confiável (normalmente com `pending_review: true`).
+- Todo campo extraído inclui metadados operacionais: `source_layer`, `confidence` e `pending_review`.
+- Para OCR funcionar em produção/desenvolvimento é obrigatório ter **ambos**:
+  - dependências Python instaladas (`pytesseract` + `pypdfium2`);
+  - binário de sistema `tesseract` disponível no `PATH`.
