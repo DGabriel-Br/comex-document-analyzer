@@ -30,6 +30,19 @@ except Exception:  # pragma: no cover
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
 
+OCR_CONFIDENCE_THRESHOLD = 0.6
+OCR_MIN_VALID_WORDS_PER_PAGE = 5
+OCR_LANG = (os.getenv("OCR_LANG") or "por+eng").strip() or "por+eng"
+
+
+@dataclass
+class OCRPageMetric:
+    page_number: int
+    characters: int
+    valid_words: int
+    estimated_confidence: float
+    rotation_applied: float
+
 
 @dataclass
 class DocumentData:
@@ -39,6 +52,9 @@ class DocumentData:
     raw_text_preview: str
     fields: Dict[str, Dict[str, Any]]
     line_items: List[Dict[str, str]]
+    extraction_method: str
+    low_ocr_confidence: bool
+    ocr_quality: List[OCRPageMetric]
 
 
 SESSIONS: Dict[str, Dict[str, DocumentData]] = {}
@@ -223,7 +239,6 @@ def parse_line_items(raw_text: str) -> List[Dict[str, str]]:
         clean = normalize_spaces(line)
         if not clean:
             continue
-        # Heurística para linhas de item: código + descrição + quantidade e valor ao final
         if re.search(r"\b\d+(?:[.,]\d+)?\b", clean) and len(clean.split()) >= 4:
             qty_match = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(pcs|kg|ctn|box|un)?\b", clean, re.IGNORECASE)
             val_match = re.search(r"(\d+[.,]\d{2})\s*$", clean)
@@ -264,6 +279,24 @@ def _get_value_for_comparative_field(doc: DocumentData, doc_type: str, field_key
 def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
     matrix: List[Dict[str, str]] = []
     divergences: List[str] = []
+    doc_completeness: Dict[str, Dict[str, Any]] = {
+        doc_type: {
+            "total_comparative_fields": len(COMPARATIVE_FIELDS),
+            "filled_comparative_fields": 0,
+            "comparative_completeness_ratio": 0.0,
+            "minimum_comparative_ratio": MIN_COMPARATIVE_COMPLETENESS_RATIO,
+            "total_required_fields": len(REQUIRED_FIELDS_BY_DOC.get(doc_type, [])),
+            "filled_required_fields": 0,
+            "required_completeness_ratio": 0.0,
+            "minimum_required_ratio": MIN_REQUIRED_COMPLETENESS_RATIO,
+            "below_minimum": False,
+            "below_required_minimum": False,
+            "required_fields": REQUIRED_FIELDS_BY_DOC.get(doc_type, []),
+            "missing_required_fields": [],
+            "document_present": doc_type in session_docs,
+        }
+        for doc_type in DOC_TYPES
+    }
 
     for field_meta in COMPARATIVE_FIELDS:
         field_key = field_meta["key"]
@@ -274,17 +307,81 @@ def compare_docs(session_docs: Dict[str, DocumentData]) -> Dict[str, object]:
             val = _get_value_for_comparative_field(doc, doc_type, field_key) if doc else ""
             row[doc_type] = val
             if val:
+                doc_completeness[doc_type]["filled_comparative_fields"] += 1
+            if val:
                 values.append(val.lower())
         matrix.append(row)
         if len(set(values)) > 1:
             divergences.append(f"Divergência no campo '{field_meta['label']}': valores diferentes entre documentos.")
 
-    missing_docs = [doc for doc in ["invoice", "packing_list", "bl"] if doc not in session_docs]
+    missing_docs = [doc for doc in DOC_TYPES if doc not in session_docs]
     if missing_docs:
         divergences.append(f"Pendência: documentos ausentes para análise cruzada: {', '.join(missing_docs)}")
 
-    status = "Aprovado" if not divergences else "Com divergências"
-    return {"status": status, "matrix": matrix, "divergences": divergences}
+    low_completeness_detected = False
+    for doc_type in DOC_TYPES:
+        metrics = doc_completeness[doc_type]
+        if not metrics["document_present"]:
+            continue
+
+        total_fields = metrics["total_comparative_fields"]
+        filled_fields = metrics["filled_comparative_fields"]
+        metrics["comparative_completeness_ratio"] = (filled_fields / total_fields) if total_fields else 0.0
+        metrics["below_minimum"] = metrics["comparative_completeness_ratio"] < MIN_COMPARATIVE_COMPLETENESS_RATIO
+
+        missing_required_fields = []
+        for required_field in metrics["required_fields"]:
+            doc = session_docs.get(doc_type)
+            value = _get_value_for_comparative_field(doc, doc_type, required_field) if doc else ""
+            if not value:
+                missing_required_fields.append(required_field)
+        metrics["missing_required_fields"] = missing_required_fields
+        total_required_fields = metrics["total_required_fields"]
+        metrics["filled_required_fields"] = total_required_fields - len(missing_required_fields)
+        metrics["required_completeness_ratio"] = (
+            metrics["filled_required_fields"] / total_required_fields if total_required_fields else 1.0
+        )
+        metrics["below_required_minimum"] = (
+            metrics["required_completeness_ratio"] < MIN_REQUIRED_COMPLETENESS_RATIO
+        )
+
+        if metrics["below_minimum"]:
+            low_completeness_detected = True
+            divergences.append(
+                "Pendência de completude: "
+                f"{doc_type} com {filled_fields}/{total_fields} campos comparativos preenchidos "
+                f"({metrics['comparative_completeness_ratio']:.0%}), "
+                f"abaixo do mínimo de {MIN_COMPARATIVE_COMPLETENESS_RATIO:.0%}."
+            )
+
+        if metrics["below_required_minimum"]:
+            low_completeness_detected = True
+            divergences.append(
+                "Pendência de completude obrigatória: "
+                f"{doc_type} com {metrics['filled_required_fields']}/{total_required_fields} campos obrigatórios preenchidos "
+                f"({metrics['required_completeness_ratio']:.0%}), "
+                f"abaixo do mínimo de {MIN_REQUIRED_COMPLETENESS_RATIO:.0%}."
+            )
+
+        if missing_required_fields:
+            divergences.append(
+                "Pendência de campos obrigatórios: "
+                f"{doc_type} sem preenchimento de {', '.join(missing_required_fields)}."
+            )
+
+    low_quality_docs = [doc.doc_type for doc in session_docs.values() if doc.low_ocr_confidence]
+    if low_quality_docs:
+        divergences.append(
+            f"Alerta de OCR: baixa confiabilidade detectada em {', '.join(low_quality_docs)}. Revisão manual recomendada."
+        )
+
+    status = "Com divergências" if divergences or low_completeness_detected else "Aprovado"
+    return {
+        "status": status,
+        "matrix": matrix,
+        "divergences": divergences,
+        "completeness": doc_completeness,
+    }
 
 
 @app.route("/")
@@ -314,7 +411,7 @@ def process_doc(doc_type: str):
 
     content = file.read()
     try:
-        text = extract_text_from_pdf(content)
+        text, ocr_quality, low_ocr_confidence, extraction_method = extract_text_from_pdf(content)
     except Exception as exc:
         return jsonify({"error": f"Falha ao extrair texto do PDF: {exc}"}), 500
 
@@ -325,6 +422,9 @@ def process_doc(doc_type: str):
         raw_text_preview=text[:1500],
         fields=parse_fields(text, doc_type=doc_type),
         line_items=parse_line_items(text),
+        extraction_method=extraction_method,
+        low_ocr_confidence=low_ocr_confidence,
+        ocr_quality=ocr_quality,
     )
     SESSIONS[sid][doc_type] = doc
 
