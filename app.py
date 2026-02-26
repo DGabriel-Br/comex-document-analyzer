@@ -137,7 +137,12 @@ def _extract_text_pdf_ocr(content: bytes) -> str:
         return ""
 
     text_parts: List[str] = []
-    pdf = pdfium.PdfDocument(io.BytesIO(content))
+    pdf = None
+    try:
+        pdf = pdfium.PdfDocument(io.BytesIO(content))
+    except Exception as exc:
+        raise RuntimeError("Falha ao abrir PDF para OCR.") from exc
+
     page_errors: List[str] = []
 
     try:
@@ -159,10 +164,11 @@ def _extract_text_pdf_ocr(content: bytes) -> str:
                 except Exception:
                     pass
     finally:
-        try:
-            pdf.close()
-        except Exception:
-            pass
+        if pdf is not None:
+            try:
+                pdf.close()
+            except Exception:
+                pass
 
     combined = "\n".join(text_parts)
     if not normalize_spaces(combined) and page_errors:
